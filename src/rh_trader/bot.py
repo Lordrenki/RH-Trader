@@ -55,7 +55,7 @@ class TraderBot(commands.Bot):
 
         @self.tree.command(description="Show a trading profile")
         @app_commands.describe(user="Optionally view another member's profile")
-        async def profile(interaction: discord.Interaction, user: Optional[discord.Member] = None):
+        async def profile(interaction: discord.Interaction, user: Optional[discord.User] = None):
             target = user or interaction.user
             if not _can_view_other(interaction, target):
                 await interaction.response.send_message(
@@ -138,7 +138,7 @@ class StockGroup(app_commands.Group):
 
     @app_commands.command(name="view", description="View stock for you or another member")
     @app_commands.describe(user="Member to view; requires manager permissions")
-    async def view(self, interaction: discord.Interaction, user: Optional[discord.Member] = None):
+    async def view(self, interaction: discord.Interaction, user: Optional[discord.User] = None):
         target = user or interaction.user
         if not _can_view_other(interaction, target):
             await interaction.response.send_message(
@@ -219,7 +219,7 @@ class WishlistGroup(app_commands.Group):
 
     @app_commands.command(name="view", description="View wishlist for you or another member")
     @app_commands.describe(user="Member to view; requires manager permissions")
-    async def view(self, interaction: discord.Interaction, user: Optional[discord.Member] = None):
+    async def view(self, interaction: discord.Interaction, user: Optional[discord.User] = None):
         target = user or interaction.user
         if not _can_view_other(interaction, target):
             await interaction.response.send_message(
