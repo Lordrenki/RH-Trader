@@ -284,9 +284,19 @@ async def send_rating_prompts(
             _log.warning("Failed to send rating prompt to %s for trade %s", user_id, trade_id)
 
 
-class TradeView(discord.ui.View):
+class BasePersistentView(discord.ui.View):
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("timeout", None)
+        super().__init__(*args, **kwargs)
+
+    def disable_all_items(self) -> None:
+        for item in self.children:
+            item.disabled = True
+
+
+class TradeView(BasePersistentView):
     def __init__(self, db: Database, trade_id: int, seller_id: int, buyer_id: int, item: str):
-        super().__init__(timeout=None)
+        super().__init__()
         self.db = db
         self.trade_id = trade_id
         self.seller_id = seller_id
@@ -323,11 +333,11 @@ class TradeView(discord.ui.View):
         await send_rating_prompts(interaction.client, self.db, self.trade_id, self.item, self.seller_id, self.buyer_id)
 
 
-class RatingView(discord.ui.View):
+class RatingView(BasePersistentView):
     def __init__(
         self, db: Database, trade_id: int, rater_id: int, partner_id: int, role: str, item: str
     ) -> None:
-        super().__init__(timeout=None)
+        super().__init__()
         self.db = db
         self.trade_id = trade_id
         self.rater_id = rater_id
