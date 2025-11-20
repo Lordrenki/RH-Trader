@@ -244,6 +244,13 @@ class Database:
                 await db.commit()
                 return cursor.lastrowid
 
+    async def delete_trade(self, trade_id: int) -> None:
+        async with self._lock:
+            async with self._connect() as db:
+                await db.execute("DELETE FROM trades WHERE id = ?", (trade_id,))
+                await db.execute("DELETE FROM trade_feedback WHERE trade_id = ?", (trade_id,))
+                await db.commit()
+
     async def complete_trade(self, trade_id: int) -> bool:
         async with self._lock:
             async with self._connect() as db:
