@@ -16,10 +16,7 @@ A Discord bot built with `discord.py` that tracks trading inventories, offers, r
    pip install -r requirements.txt
    ```
 2. **Environment variables**
-   - Copy `.env.example` to `.env` and fill in your token.
-   ```bash
-   cp .env.example .env
-   ```
+   - Update the bundled `.env` file with your Discord bot token.
    - Required:
      - `DISCORD_TOKEN`: Bot token from the Discord Developer Portal.
    - Optional:
