@@ -25,16 +25,9 @@ A Discord bot built with `discord.py` that tracks trading inventories, offers, r
    - Optional:
      - `TRADER_DB_PATH`: Path to the SQLite database file (default: `data/trader.db`).
 3. **Run the bot**
-   - Directly from the repo (no install needed):
-     ```bash
-     python bot.py
-     ```
-     The entrypoint adds the local `src` directory to `PYTHONPATH` so imports like `rh_trader.bot` resolve.
-   - Or install in editable mode and run the module:
-     ```bash
-     pip install -e .
-     python -m rh_trader.bot
-     ```
+   ```bash
+   python bot.py
+   ```
 
 ## Commands
 - `/stock add <item> [quantity]`
