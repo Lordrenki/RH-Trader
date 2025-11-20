@@ -1,0 +1,14 @@
+[project]
+name = "rh-trader"
+version = "0.1.0"
+description = "Discord trading helper bot"
+requires-python = ">=3.10"
+dependencies = [
+    "discord.py>=2.3.2",
+    "aiosqlite>=0.19.0",
+    "python-dotenv>=1.0.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+asyncio_mode = "auto"

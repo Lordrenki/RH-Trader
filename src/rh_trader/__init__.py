@@ -1,0 +1,1 @@
+"""Discord trading bot package."""
