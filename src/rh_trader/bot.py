@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import List, Optional
 
 import discord
 from discord import app_commands
@@ -185,8 +185,9 @@ class TradeGroup(app_commands.Group):
         item: str,
         role: app_commands.Choice[str],
     ):
+        await interaction.response.defer(ephemeral=True)
         if partner.id == interaction.user.id:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=info_embed("⚠️ Invalid trade", "You cannot open a trade with yourself."),
                 ephemeral=True,
             )
@@ -195,14 +196,31 @@ class TradeGroup(app_commands.Group):
         seller_id = interaction.user.id if role.value == "seller" else partner.id
         buyer_id = partner.id if role.value == "seller" else interaction.user.id
         trade_id = await self.db.create_trade(seller_id, buyer_id, item)
-        await interaction.response.send_message(
+        failed_dm_ids = await send_trade_invites(
+            interaction.client, self.db, trade_id, item, seller_id, buyer_id
+        )
+        if failed_dm_ids:
+            await self.db.delete_trade(trade_id)
+            targets = " and ".join(f"<@{user_id}>" for user_id in failed_dm_ids)
+            await interaction.followup.send(
+                embed=info_embed(
+                    "🚫 Cannot start trade",
+                    (
+                        f"I couldn't DM {targets}. They may have privacy settings or blocks enabled.\n"
+                        "The trade was not started."
+                    ),
+                ),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
             embed=info_embed(
                 "🤝 Trade opened",
                 f"Trade #{trade_id} created with {partner.mention} for **{item}**. Check your DMs to continue.",
             ),
             ephemeral=True,
         )
-        await send_trade_invites(interaction.client, self.db, trade_id, item, seller_id, buyer_id)
 
 
 class WishlistGroup(app_commands.Group):
@@ -242,7 +260,8 @@ class WishlistGroup(app_commands.Group):
 
 async def send_trade_invites(
     bot: commands.Bot, db: Database, trade_id: int, item: str, seller_id: int, buyer_id: int
-) -> None:
+) -> List[int]:
+    failed_ids: List[int] = []
     for user_id in (seller_id, buyer_id):
         role_label = "Seller" if user_id == seller_id else "Buyer"
         partner_id = buyer_id if user_id == seller_id else seller_id
@@ -258,8 +277,10 @@ async def send_trade_invites(
                 ),
                 view=TradeView(db, trade_id, seller_id, buyer_id, item),
             )
-        except discord.HTTPException:
+        except (discord.Forbidden, discord.HTTPException):
+            failed_ids.append(user_id)
             _log.warning("Failed to DM user %s for trade %s", user_id, trade_id)
+    return failed_ids
 
 
 async def send_rating_prompts(
