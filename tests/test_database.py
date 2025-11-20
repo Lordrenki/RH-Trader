@@ -78,4 +78,26 @@ async def test_trade_status(tmp_path: Path):
 
     rows = [row for table, row in [entry async for entry in db.dump_state()] if table == "trades"]
     assert rows[0][0] == 10
-    assert rows[0][-1] == "archived"
+    assert rows[0][4] == "archived"
+    assert rows[0][5] == 1
+    assert rows[0][6] == 2
+
+
+async def test_trade_flow(tmp_path: Path):
+    db = await init_db(tmp_path)
+    trade_id = await db.create_trade(5, 6, "Rare Item")
+
+    trade = await db.get_trade(trade_id)
+    assert trade == (trade_id, 5, 6, "Rare Item", "open")
+
+    latest = await db.latest_open_trade_for_user(6)
+    assert latest[0] == trade_id
+
+    completed = await db.complete_trade(trade_id)
+    assert completed
+    assert await db.latest_open_trade_for_user(5) is None
+
+    recorded = await db.record_trade_rating(trade_id, 5, 6, 5, "seller")
+    assert recorded
+    duplicate = await db.record_trade_rating(trade_id, 5, 6, 4, "seller")
+    assert duplicate is False

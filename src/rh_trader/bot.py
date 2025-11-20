@@ -10,14 +10,7 @@ from discord.ext import commands
 
 from .config import Settings, load_settings
 from .database import Database
-from .embeds import (
-    format_offers,
-    format_requests,
-    format_stock,
-    format_wishlist,
-    info_embed,
-    rating_summary,
-)
+from .embeds import format_stock, format_wishlist, info_embed, rating_summary
 
 _log = logging.getLogger(__name__)
 
@@ -50,35 +43,6 @@ class TraderBot(commands.Bot):
 
     async def add_misc_commands(self) -> None:
         db = self.db
-
-        @self.tree.command(description="Post an item you have available")
-        @app_commands.describe(item="Item name", quantity="Number available", details="Extra details like price")
-        async def offer(interaction: discord.Interaction, item: str, quantity: int = 1, details: str = ""):
-            await db.add_offer(interaction.user.id, item, max(1, quantity), details)
-            embed = info_embed("💰 Offer posted", f"Added **{item}** x{max(1, quantity)} to offers.")
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-
-        @self.tree.command(description="View recent offers")
-        @app_commands.describe(limit="How many to show (max 25)")
-        async def offers(interaction: discord.Interaction, limit: int = 10):
-            entries = await db.list_offers(min(25, max(1, limit)))
-            embed = info_embed("💰 Recent offers", format_offers(entries))
-            await interaction.response.send_message(embed=embed)
-
-        @self.tree.command(description="Post an item you want to obtain")
-        @app_commands.describe(item="Item name", quantity="Number requested", details="Extra details or trade terms")
-        async def request(interaction: discord.Interaction, item: str, quantity: int = 1, details: str = ""):
-            await db.add_request(interaction.user.id, item, max(1, quantity), details)
-            embed = info_embed("📢 Request posted", f"Requested **{item}** x{max(1, quantity)}.")
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-
-        @self.tree.command(description="View recent requests")
-        @app_commands.describe(limit="How many to show (max 25)")
-        async def requests(interaction: discord.Interaction, limit: int = 10):
-            entries = await db.list_requests(min(25, max(1, limit)))
-            embed = info_embed("📢 Recent requests", format_requests(entries))
-            await interaction.response.send_message(embed=embed)
-
         @self.tree.command(description="Search community inventories for an item")
         @app_commands.describe(term="Keyword to search for")
         async def search(interaction: discord.Interaction, term: str):
@@ -88,13 +52,6 @@ class TraderBot(commands.Bot):
             ) or "No matching items found."
             embed = info_embed("🔎 Search results", description)
             await interaction.response.send_message(embed=embed)
-
-        @self.tree.command(description="Set contact information others can see")
-        @app_commands.describe(contact="DM tag, social handle, or preferred contact method")
-        async def contact(interaction: discord.Interaction, contact: str):
-            await db.set_contact(interaction.user.id, contact)
-            embed = info_embed("📇 Contact saved", f"Contact preference updated to: {contact}")
-            await interaction.response.send_message(embed=embed, ephemeral=True)
 
         @self.tree.command(description="Show a trading profile")
         @app_commands.describe(user="Optionally view another member's profile")
@@ -107,15 +64,13 @@ class TraderBot(commands.Bot):
                 )
                 return
 
-            contact, score, count = await db.profile(target.id)
+            _, score, count = await db.profile(target.id)
             stock = await db.get_stock(target.id)
             wishlist = await db.get_wishlist(target.id)
             embed = info_embed(
                 f"🧾 Profile for {target.display_name}",
                 description=rating_summary(score, count),
             )
-            if contact:
-                embed.add_field(name="Contact", value=contact, inline=False)
             embed.add_field(name="Inventory", value=format_stock(stock), inline=False)
             embed.add_field(name="Wishlist", value=format_wishlist(wishlist), inline=False)
             await interaction.response.send_message(embed=embed)
@@ -132,6 +87,40 @@ class TraderBot(commands.Bot):
                 f"{idx+1}. <@{user_id}> — {rating_summary(score, count)}" for idx, (user_id, score, count) in enumerate(rows)
             )
             await interaction.response.send_message(embed=info_embed("🏆 Leaderboard", description))
+
+    async def on_message(self, message: discord.Message) -> None:
+        if message.author.bot:
+            return
+        await super().on_message(message)
+        if not isinstance(message.channel, discord.DMChannel):
+            return
+        trade = await self.db.latest_open_trade_for_user(message.author.id)
+        if not trade:
+            return
+        trade_id, seller_id, buyer_id, item, _ = trade
+        partner_id = buyer_id if message.author.id == seller_id else seller_id
+        try:
+            partner = self.get_user(partner_id) or await self.fetch_user(partner_id)
+        except discord.HTTPException:
+            _log.warning("Failed to fetch partner %s for trade %s", partner_id, trade_id)
+            return
+
+        content = message.content.strip()
+        attachment_lines = [f"{attachment.filename}: {attachment.url}" for attachment in message.attachments]
+        payload = content or "[No message content]"
+        if attachment_lines:
+            payload += "\nAttachments:\n" + "\n".join(attachment_lines)
+
+        try:
+            await partner.send(
+                embed=info_embed(
+                    f"📨 Trade #{trade_id} update",
+                    f"Message from <@{message.author.id}> regarding **{item}**:\n{payload}",
+                )
+            )
+            await message.add_reaction("📨")
+        except discord.HTTPException:
+            _log.warning("Failed to relay message for trade %s", trade_id)
 
 
 class StockGroup(app_commands.Group):
@@ -181,40 +170,39 @@ class TradeGroup(app_commands.Group):
         super().__init__(name="trade", description="Manage trades and ratings")
         self.db = db
 
-    @app_commands.command(name="rate", description="Rate a completed trade partner")
-    @app_commands.describe(user="User to rate", score="Score between 1 and 5")
-    async def rate(self, interaction: discord.Interaction, user: discord.Member, score: int):
-        if score < 1 or score > 5:
+    @app_commands.command(name="start", description="Open a trade and move the conversation to DMs")
+    @app_commands.describe(partner="Partner involved in the trade", item="Item or service being traded", role="Are you the seller or buyer?")
+    @app_commands.choices(
+        role=[
+            app_commands.Choice(name="Seller", value="seller"),
+            app_commands.Choice(name="Buyer", value="buyer"),
+        ]
+    )
+    async def start(
+        self,
+        interaction: discord.Interaction,
+        partner: discord.Member,
+        item: str,
+        role: app_commands.Choice[str],
+    ):
+        if partner.id == interaction.user.id:
             await interaction.response.send_message(
-                embed=info_embed("⚠️ Invalid rating", "Score must be between 1 and 5."),
+                embed=info_embed("⚠️ Invalid trade", "You cannot open a trade with yourself."),
                 ephemeral=True,
             )
             return
-        await self.db.record_rating(user.id, score)
-        embed = info_embed("⭐ Rating recorded", f"Thank you! {user.mention} received a {score}-star rating.")
-        await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="add", description="Track an active trade")
-    @app_commands.describe(partner="Partner involved", item="Item being traded")
-    async def add(self, interaction: discord.Interaction, partner: discord.Member, item: str):
-        trade_id = await self.db.create_trade(interaction.user.id, partner.id, item)
-        embed = info_embed(
-            "📄 Trade created",
-            f"Trade #{trade_id} opened with {partner.mention} for **{item}**. Use /trade complete to close it.",
+        seller_id = interaction.user.id if role.value == "seller" else partner.id
+        buyer_id = partner.id if role.value == "seller" else interaction.user.id
+        trade_id = await self.db.create_trade(seller_id, buyer_id, item)
+        await interaction.response.send_message(
+            embed=info_embed(
+                "🤝 Trade opened",
+                f"Trade #{trade_id} created with {partner.mention} for **{item}**. Check your DMs to continue.",
+            ),
+            ephemeral=True,
         )
-        await interaction.response.send_message(embed=embed)
-
-    @app_commands.command(name="complete", description="Mark a trade as completed")
-    @app_commands.describe(trade_id="Trade identifier", partner="Partner involved", item="Item traded")
-    async def complete(
-        self, interaction: discord.Interaction, trade_id: int, partner: discord.Member, item: str
-    ):
-        await self.db.set_trade_status(trade_id, "completed", create_if_missing=(interaction.user.id, partner.id, item))
-        embed = info_embed(
-            "✅ Trade completed",
-            f"Trade #{trade_id} with {partner.mention} for **{item}** marked complete.",
-        )
-        await interaction.response.send_message(embed=embed)
+        await send_trade_invites(interaction.client, self.db, trade_id, item, seller_id, buyer_id)
 
 
 class WishlistGroup(app_commands.Group):
@@ -250,6 +238,144 @@ class WishlistGroup(app_commands.Group):
         message = "Wishlist item removed." if removed else "Item not found on your wishlist."
         embed = info_embed("🧹 Wishlist cleanup", message)
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+async def send_trade_invites(
+    bot: commands.Bot, db: Database, trade_id: int, item: str, seller_id: int, buyer_id: int
+) -> None:
+    for user_id in (seller_id, buyer_id):
+        role_label = "Seller" if user_id == seller_id else "Buyer"
+        partner_id = buyer_id if user_id == seller_id else seller_id
+        try:
+            user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+            await user.send(
+                embed=info_embed(
+                    f"🤝 Trade #{trade_id} started",
+                    (
+                        f"You are the **{role_label}** for **{item}** with <@{partner_id}>.\n"
+                        "Reply in this DM to send messages to your partner."
+                    ),
+                ),
+                view=TradeView(db, trade_id, seller_id, buyer_id, item),
+            )
+        except discord.HTTPException:
+            _log.warning("Failed to DM user %s for trade %s", user_id, trade_id)
+
+
+async def send_rating_prompts(
+    bot: commands.Bot, db: Database, trade_id: int, item: str, seller_id: int, buyer_id: int
+) -> None:
+    for user_id in (seller_id, buyer_id):
+        partner_id = buyer_id if user_id == seller_id else seller_id
+        role_value = "seller" if user_id == seller_id else "buyer"
+        try:
+            user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+            await user.send(
+                embed=info_embed(
+                    "⭐ Rate your partner",
+                    (
+                        f"Trade #{trade_id} for **{item}** is complete.\n"
+                        f"You traded with <@{partner_id}> as the {role_value}."
+                    ),
+                ),
+                view=RatingView(db, trade_id, user_id, partner_id, role_value, item),
+            )
+        except discord.HTTPException:
+            _log.warning("Failed to send rating prompt to %s for trade %s", user_id, trade_id)
+
+
+class TradeView(discord.ui.View):
+    def __init__(self, db: Database, trade_id: int, seller_id: int, buyer_id: int, item: str):
+        super().__init__(timeout=None)
+        self.db = db
+        self.trade_id = trade_id
+        self.seller_id = seller_id
+        self.buyer_id = buyer_id
+        self.item = item
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id not in {self.seller_id, self.buyer_id}:
+            await interaction.response.send_message(
+                embed=info_embed("🚫 Not your trade", "Only participants can manage this trade."),
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Mark Trade Completed", style=discord.ButtonStyle.green, emoji="✅")
+    async def complete_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        updated = await self.db.complete_trade(self.trade_id)
+        if not updated:
+            await interaction.response.send_message(
+                embed=info_embed("Trade already completed", f"Trade #{self.trade_id} is already marked done."),
+                ephemeral=True,
+            )
+            return
+        self.disable_all_items()
+        try:
+            await interaction.message.edit(view=self)
+        except discord.HTTPException:
+            pass
+        await interaction.response.send_message(
+            embed=info_embed("✅ Trade completed", f"Trade #{self.trade_id} for **{self.item}** is now complete."),
+            ephemeral=True,
+        )
+        await send_rating_prompts(interaction.client, self.db, self.trade_id, self.item, self.seller_id, self.buyer_id)
+
+
+class RatingView(discord.ui.View):
+    def __init__(
+        self, db: Database, trade_id: int, rater_id: int, partner_id: int, role: str, item: str
+    ) -> None:
+        super().__init__(timeout=None)
+        self.db = db
+        self.trade_id = trade_id
+        self.rater_id = rater_id
+        self.partner_id = partner_id
+        self.role = role
+        self.item = item
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.rater_id:
+            await interaction.response.send_message(
+                embed=info_embed("🚫 Not your rating", "Only this trade participant can submit this rating."),
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def _handle_rating(self, interaction: discord.Interaction, score: int) -> None:
+        recorded = await self.db.record_trade_rating(
+            self.trade_id, self.rater_id, self.partner_id, score, self.role
+        )
+        self.disable_all_items()
+        embed = info_embed(
+            "⭐ Rating received" if recorded else "ℹ️ Rating already recorded",
+            f"You rated <@{self.partner_id}> {score} star(s) for **{self.item}**."
+            if recorded
+            else "You have already submitted feedback for this trade.",
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="1", style=discord.ButtonStyle.gray)
+    async def rate_one(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._handle_rating(interaction, 1)
+
+    @discord.ui.button(label="2", style=discord.ButtonStyle.gray)
+    async def rate_two(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._handle_rating(interaction, 2)
+
+    @discord.ui.button(label="3", style=discord.ButtonStyle.primary)
+    async def rate_three(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._handle_rating(interaction, 3)
+
+    @discord.ui.button(label="4", style=discord.ButtonStyle.primary)
+    async def rate_four(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._handle_rating(interaction, 4)
+
+    @discord.ui.button(label="5", style=discord.ButtonStyle.success)
+    async def rate_five(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._handle_rating(interaction, 5)
 
 
 def run_bot() -> None:
