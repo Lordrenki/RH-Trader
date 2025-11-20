@@ -303,19 +303,60 @@ class TradeView(BasePersistentView):
         self.buyer_id = buyer_id
         self.item = item
 
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id not in {self.seller_id, self.buyer_id}:
+    async def _ensure_open(self, interaction: discord.Interaction) -> bool:
+        trade = await self.db.get_trade(self.trade_id)
+        if not trade:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "Trade unavailable",
+                    f"Trade #{self.trade_id} could not be found. Please start a new trade.",
+                ),
+                ephemeral=True,
+            )
+            return False
+
+        _, seller_id, buyer_id, _, status = trade
+        if interaction.user.id not in {seller_id, buyer_id}:
             await interaction.response.send_message(
                 embed=info_embed("🚫 Not your trade", "Only participants can manage this trade."),
                 ephemeral=True,
             )
             return False
+
+        if status != "open":
+            self.disable_all_items()
+            try:
+                await interaction.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+            status_label = "completed" if status == "completed" else "cancelled"
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "ℹ️ Trade closed",
+                    f"Trade #{self.trade_id} is already {status_label}.",
+                ),
+                ephemeral=True,
+            )
+            return False
+
         return True
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return await self._ensure_open(interaction)
 
     @discord.ui.button(label="Mark Trade Completed", style=discord.ButtonStyle.green, emoji="✅")
     async def complete_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if not await self._ensure_open(interaction):
+            return
+
         updated = await self.db.complete_trade(self.trade_id)
         if not updated:
+            self.disable_all_items()
+            try:
+                await interaction.message.edit(view=self)
+            except discord.HTTPException:
+                pass
             await interaction.response.send_message(
                 embed=info_embed("Trade already completed", f"Trade #{self.trade_id} is already marked done."),
                 ephemeral=True,
@@ -331,6 +372,38 @@ class TradeView(BasePersistentView):
             ephemeral=True,
         )
         await send_rating_prompts(interaction.client, self.db, self.trade_id, self.item, self.seller_id, self.buyer_id)
+
+    @discord.ui.button(label="Cancel Trade", style=discord.ButtonStyle.danger, emoji="🛑")
+    async def cancel_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if not await self._ensure_open(interaction):
+            return
+
+        cancelled = await self.db.cancel_trade(self.trade_id)
+        if not cancelled:
+            self.disable_all_items()
+            try:
+                await interaction.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "Trade already closed", f"Trade #{self.trade_id} is already completed or cancelled."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        self.disable_all_items()
+        try:
+            await interaction.message.edit(view=self)
+        except discord.HTTPException:
+            pass
+        await interaction.response.send_message(
+            embed=info_embed(
+                "🚫 Trade cancelled", f"Trade #{self.trade_id} for **{self.item}** has been cancelled."
+            ),
+            ephemeral=True,
+        )
 
 
 class RatingView(BasePersistentView):

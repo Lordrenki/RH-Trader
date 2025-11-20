@@ -248,7 +248,17 @@ class Database:
         async with self._lock:
             async with self._connect() as db:
                 cursor = await db.execute(
-                    "UPDATE trades SET status = 'completed' WHERE id = ? AND status != 'completed'",
+                    "UPDATE trades SET status = 'completed' WHERE id = ? AND status = 'open'",
+                    (trade_id,),
+                )
+                await db.commit()
+                return cursor.rowcount > 0
+
+    async def cancel_trade(self, trade_id: int) -> bool:
+        async with self._lock:
+            async with self._connect() as db:
+                cursor = await db.execute(
+                    "UPDATE trades SET status = 'cancelled' WHERE id = ? AND status = 'open'",
                     (trade_id,),
                 )
                 await db.commit()
