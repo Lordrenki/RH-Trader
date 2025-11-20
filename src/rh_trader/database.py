@@ -209,6 +209,16 @@ class Database:
                 )
                 await db.commit()
 
+    async def create_trade(self, user_id: int, partner_id: int, item: str) -> int:
+        async with self._lock:
+            async with self._connect() as db:
+                cursor = await db.execute(
+                    "INSERT INTO trades(user_id, partner_id, item, status) VALUES (?, ?, ?, 'open')",
+                    (user_id, partner_id, item.strip()),
+                )
+                await db.commit()
+                return cursor.lastrowid
+
     async def set_trade_status(
         self, trade_id: int, status: str, *, create_if_missing: Tuple[int, int, str] | None = None
     ) -> None:

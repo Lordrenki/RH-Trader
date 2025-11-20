@@ -32,10 +32,13 @@ A Discord bot built with `discord.py` that tracks trading inventories, offers, r
 - `/stock remove <item>`
 - `/stock clear`
 - `/offer <item> [quantity] [details]`
+- `/offers [limit]`
 - `/request <item> [quantity] [details]`
+- `/requests [limit]`
 - `/search <term>`
 - `/contact <contact>`
 - `/profile [user]`
+- `/trade add <partner> <item>`
 - `/trade rate <user> <score 1-5>`
 - `/trade complete <trade_id> <partner> <item>`
 - `/leaderboard`
