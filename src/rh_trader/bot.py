@@ -58,12 +58,26 @@ class TraderBot(commands.Bot):
             embed = info_embed("💰 Offer posted", f"Added **{item}** x{max(1, quantity)} to offers.")
             await interaction.response.send_message(embed=embed, ephemeral=True)
 
+        @self.tree.command(description="View recent offers")
+        @app_commands.describe(limit="How many to show (max 25)")
+        async def offers(interaction: discord.Interaction, limit: int = 10):
+            entries = await db.list_offers(min(25, max(1, limit)))
+            embed = info_embed("💰 Recent offers", format_offers(entries))
+            await interaction.response.send_message(embed=embed)
+
         @self.tree.command(description="Post an item you want to obtain")
         @app_commands.describe(item="Item name", quantity="Number requested", details="Extra details or trade terms")
         async def request(interaction: discord.Interaction, item: str, quantity: int = 1, details: str = ""):
             await db.add_request(interaction.user.id, item, max(1, quantity), details)
             embed = info_embed("📢 Request posted", f"Requested **{item}** x{max(1, quantity)}.")
             await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        @self.tree.command(description="View recent requests")
+        @app_commands.describe(limit="How many to show (max 25)")
+        async def requests(interaction: discord.Interaction, limit: int = 10):
+            entries = await db.list_requests(min(25, max(1, limit)))
+            embed = info_embed("📢 Recent requests", format_requests(entries))
+            await interaction.response.send_message(embed=embed)
 
         @self.tree.command(description="Search community inventories for an item")
         @app_commands.describe(term="Keyword to search for")
@@ -178,6 +192,16 @@ class TradeGroup(app_commands.Group):
             return
         await self.db.record_rating(user.id, score)
         embed = info_embed("⭐ Rating recorded", f"Thank you! {user.mention} received a {score}-star rating.")
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="add", description="Track an active trade")
+    @app_commands.describe(partner="Partner involved", item="Item being traded")
+    async def add(self, interaction: discord.Interaction, partner: discord.Member, item: str):
+        trade_id = await self.db.create_trade(interaction.user.id, partner.id, item)
+        embed = info_embed(
+            "📄 Trade created",
+            f"Trade #{trade_id} opened with {partner.mention} for **{item}**. Use /trade complete to close it.",
+        )
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="complete", description="Mark a trade as completed")
