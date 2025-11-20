@@ -6,6 +6,7 @@ import os
 from typing import Iterable, List, Tuple
 
 import aiosqlite
+from rapidfuzz import fuzz
 
 
 class Database:
@@ -184,13 +185,28 @@ class Database:
             return await cursor.fetchall()
 
     async def search_stock(self, term: str) -> List[Tuple[int, str, int]]:
-        like = f"%{term.strip()}%"
+        term = term.strip()
+        if not term:
+            return []
+
+        normalized_term = self._normalize_text(term)
         async with self._connect() as db:
-            cursor = await db.execute(
-                "SELECT user_id, item, quantity FROM inventories WHERE item LIKE ? ORDER BY item",
-                (like,),
-            )
-            return await cursor.fetchall()
+            cursor = await db.execute("SELECT user_id, item, quantity FROM inventories")
+            rows = await cursor.fetchall()
+
+        scored = []
+        for row in rows:
+            user_id, item, quantity = row
+            score = fuzz.WRatio(normalized_term, self._normalize_text(item))
+            if score >= 60:
+                scored.append((score, user_id, item, quantity))
+
+        scored.sort(key=lambda entry: (-entry[0], entry[2].lower(), entry[1]))
+        return [(user_id, item, quantity) for _, user_id, item, quantity in scored[:20]]
+
+    @staticmethod
+    def _normalize_text(value: str) -> str:
+        return " ".join(value.lower().split())
 
     async def add_wishlist(self, user_id: int, item: str, note: str) -> None:
         await self.ensure_user(user_id)
