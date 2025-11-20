@@ -62,14 +62,36 @@ class Database:
                     user_id INTEGER NOT NULL,
                     partner_id INTEGER NOT NULL,
                     item TEXT NOT NULL,
-                    status TEXT DEFAULT 'open'
+                    status TEXT DEFAULT 'open',
+                    seller_id INTEGER,
+                    buyer_id INTEGER
+                );
+                
+                CREATE TABLE IF NOT EXISTS trade_feedback (
+                    trade_id INTEGER NOT NULL,
+                    rater_id INTEGER NOT NULL,
+                    partner_id INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    score INTEGER NOT NULL,
+                    PRIMARY KEY (trade_id, rater_id)
                 );
                 """
             )
             await db.commit()
+            await self._ensure_trade_columns(db)
 
     def _connect(self) -> aiosqlite.Connection:
         return aiosqlite.connect(self.path)
+
+    async def _ensure_trade_columns(self, db: aiosqlite.Connection) -> None:
+        """Add new trade columns when upgrading an existing database."""
+        cursor = await db.execute("PRAGMA table_info(trades)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        if "seller_id" not in columns:
+            await db.execute("ALTER TABLE trades ADD COLUMN seller_id INTEGER")
+        if "buyer_id" not in columns:
+            await db.execute("ALTER TABLE trades ADD COLUMN buyer_id INTEGER")
+        await db.commit()
 
     async def ensure_user(self, user_id: int) -> None:
         async with self._lock:
@@ -209,15 +231,71 @@ class Database:
                 )
                 await db.commit()
 
-    async def create_trade(self, user_id: int, partner_id: int, item: str) -> int:
+    async def create_trade(self, seller_id: int, buyer_id: int, item: str) -> int:
+        await self.ensure_user(seller_id)
+        await self.ensure_user(buyer_id)
         async with self._lock:
             async with self._connect() as db:
                 cursor = await db.execute(
-                    "INSERT INTO trades(user_id, partner_id, item, status) VALUES (?, ?, ?, 'open')",
-                    (user_id, partner_id, item.strip()),
+                    "INSERT INTO trades(user_id, partner_id, item, status, seller_id, buyer_id)\n"
+                    "VALUES (?, ?, ?, 'open', ?, ?)",
+                    (seller_id, buyer_id, item.strip(), seller_id, buyer_id),
                 )
                 await db.commit()
                 return cursor.lastrowid
+
+    async def complete_trade(self, trade_id: int) -> bool:
+        async with self._lock:
+            async with self._connect() as db:
+                cursor = await db.execute(
+                    "UPDATE trades SET status = 'completed' WHERE id = ? AND status != 'completed'",
+                    (trade_id,),
+                )
+                await db.commit()
+                return cursor.rowcount > 0
+
+    async def get_trade(self, trade_id: int) -> Tuple[int, int, int, str, str] | None:
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "SELECT id, seller_id, buyer_id, item, status FROM trades WHERE id = ?",
+                (trade_id,),
+            )
+            return await cursor.fetchone()
+
+    async def latest_open_trade_for_user(self, user_id: int) -> Tuple[int, int, int, str, str] | None:
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "SELECT id, seller_id, buyer_id, item, status FROM trades\n"
+                "WHERE status = 'open' AND (seller_id = ? OR buyer_id = ?)\n"
+                "ORDER BY id DESC LIMIT 1",
+                (user_id, user_id),
+            )
+            return await cursor.fetchone()
+
+    async def record_trade_rating(
+        self, trade_id: int, rater_id: int, partner_id: int, score: int, role: str
+    ) -> bool:
+        if score < 1 or score > 5:
+            raise ValueError("Score must be between 1 and 5")
+        await self.ensure_user(rater_id)
+        await self.ensure_user(partner_id)
+        async with self._lock:
+            async with self._connect() as db:
+                cursor = await db.execute(
+                    "INSERT OR IGNORE INTO trade_feedback(trade_id, rater_id, partner_id, role, score)\n"
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (trade_id, rater_id, partner_id, role, score),
+                )
+                if cursor.rowcount == 0:
+                    await db.commit()
+                    return False
+                await db.execute(
+                    "UPDATE users SET rating_total = rating_total + ?, rating_count = rating_count + 1\n"
+                    "WHERE user_id = ?",
+                    (score, partner_id),
+                )
+                await db.commit()
+                return True
 
     async def set_trade_status(
         self, trade_id: int, status: str, *, create_if_missing: Tuple[int, int, str] | None = None
@@ -227,9 +305,9 @@ class Database:
                 if create_if_missing:
                     user_id, partner_id, item = create_if_missing
                     await db.execute(
-                        "INSERT INTO trades(id, user_id, partner_id, item, status) VALUES (?, ?, ?, ?, ?)\n"
+                        "INSERT INTO trades(id, user_id, partner_id, item, status, seller_id, buyer_id) VALUES (?, ?, ?, ?, ?, ?, ?)\n"
                         "ON CONFLICT(id) DO UPDATE SET status = excluded.status",
-                        (trade_id, user_id, partner_id, item, status),
+                        (trade_id, user_id, partner_id, item, status, user_id, partner_id),
                     )
                 else:
                     await db.execute(
@@ -271,7 +349,15 @@ class Database:
     async def dump_state(self) -> Iterable[Tuple[str, Tuple]]:
         """Used for debugging and tests to inspect stored state."""
         async with self._connect() as db:
-            for table in ["users", "inventories", "offers", "requests", "wishlist", "trades"]:
+            for table in [
+                "users",
+                "inventories",
+                "offers",
+                "requests",
+                "wishlist",
+                "trades",
+                "trade_feedback",
+            ]:
                 cursor = await db.execute(f"SELECT * FROM {table}")
                 for row in await cursor.fetchall():
                     yield table, row
