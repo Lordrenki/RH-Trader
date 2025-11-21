@@ -101,3 +101,13 @@ async def test_trade_flow(tmp_path: Path):
     assert recorded
     duplicate = await db.record_trade_rating(trade_id, 5, 6, 4, "seller")
     assert duplicate is False
+
+
+async def test_trade_channel_settings(tmp_path: Path):
+    db = await init_db(tmp_path)
+
+    assert await db.get_trade_channel(123) is None
+    await db.set_trade_channel(123, 456)
+    assert await db.get_trade_channel(123) == 456
+    await db.set_trade_channel(123, None)
+    assert await db.get_trade_channel(123) is None

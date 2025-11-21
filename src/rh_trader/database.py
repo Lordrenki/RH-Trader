@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Optional, Tuple
 
 import aiosqlite
 from rapidfuzz import fuzz
@@ -75,6 +75,11 @@ class Database:
                     role TEXT NOT NULL,
                     score INTEGER NOT NULL,
                     PRIMARY KEY (trade_id, rater_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS guild_settings (
+                    guild_id INTEGER PRIMARY KEY,
+                    trade_channel_id INTEGER
                 );
                 """
             )
@@ -390,7 +395,30 @@ class Database:
                 "wishlist",
                 "trades",
                 "trade_feedback",
+                "guild_settings",
             ]:
                 cursor = await db.execute(f"SELECT * FROM {table}")
                 for row in await cursor.fetchall():
                     yield table, row
+
+    async def set_trade_channel(self, guild_id: int, channel_id: Optional[int]) -> None:
+        """Persist the configured trade post channel for a guild."""
+
+        async with self._lock:
+            async with self._connect() as db:
+                await db.execute(
+                    "INSERT INTO guild_settings(guild_id, trade_channel_id) VALUES (?, ?)\n"
+                    "ON CONFLICT(guild_id) DO UPDATE SET trade_channel_id = excluded.trade_channel_id",
+                    (guild_id, channel_id),
+                )
+                await db.commit()
+
+    async def get_trade_channel(self, guild_id: int) -> Optional[int]:
+        """Return the configured trade post channel, if present."""
+
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "SELECT trade_channel_id FROM guild_settings WHERE guild_id = ?", (guild_id,)
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else None
