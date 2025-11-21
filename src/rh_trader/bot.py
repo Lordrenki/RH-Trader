@@ -16,10 +16,8 @@ _log = logging.getLogger(__name__)
 
 
 def _can_view_other(interaction: discord.Interaction, target: discord.User | discord.Member) -> bool:
-    if interaction.user.id == target.id:
-        return True
-    perms = getattr(interaction.user, "guild_permissions", None)
-    return bool(perms and (perms.manage_guild or perms.administrator or perms.manage_messages))
+    # Allow anyone to view another member's data.
+    return True
 
 
 class TraderBot(commands.Bot):
@@ -137,7 +135,7 @@ class StockGroup(app_commands.Group):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="view", description="View stock for you or another member")
-    @app_commands.describe(user="Member to view; requires manager permissions")
+    @app_commands.describe(user="Member to view")
     async def view(self, interaction: discord.Interaction, user: Optional[discord.User] = None):
         target = user or interaction.user
         if not _can_view_other(interaction, target):
@@ -236,7 +234,7 @@ class WishlistGroup(app_commands.Group):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="view", description="View wishlist for you or another member")
-    @app_commands.describe(user="Member to view; requires manager permissions")
+    @app_commands.describe(user="Member to view")
     async def view(self, interaction: discord.Interaction, user: Optional[discord.User] = None):
         target = user or interaction.user
         if not _can_view_other(interaction, target):
