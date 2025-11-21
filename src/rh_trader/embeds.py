@@ -8,7 +8,7 @@ import discord
 
 def info_embed(title: str, description: str | None = None, *, color: int = 0x2b2d31) -> discord.Embed:
     embed = discord.Embed(title=title, description=description or "", color=color)
-    embed.set_footer(text="RH-Trader • Powered by discord.py")
+    embed.set_footer(text="Scrap Market • Made with ♡ by Kuro")
     return embed
 
 
