@@ -86,6 +86,123 @@ class TraderBot(commands.Bot):
             )
             await interaction.response.send_message(embed=info_embed("🏆 Leaderboard", description))
 
+        @self.tree.command(description="Set the trade post channel for this server")
+        @app_commands.checks.has_permissions(manage_guild=True)
+        @app_commands.describe(channel="Channel where /tradepost submissions will be sent")
+        async def set_trade_channel(
+            interaction: discord.Interaction, channel: discord.TextChannel
+        ):
+            if interaction.guild is None:
+                await interaction.response.send_message(
+                    embed=info_embed("🌐 Guild only", "This command can only be used inside a server."),
+                    ephemeral=True,
+                )
+                return
+
+            await db.set_trade_channel(interaction.guild.id, channel.id)
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "✅ Trade channel saved",
+                    f"Trade posts will be sent to {channel.mention}.",
+                ),
+                ephemeral=True,
+            )
+
+        @self.tree.command(description="Post your stock and wishlist to the server's trade board")
+        @app_commands.describe(image="Optional image to showcase your items")
+        async def tradepost(
+            interaction: discord.Interaction, image: Optional[discord.Attachment] = None
+        ):
+            if interaction.guild is None:
+                await interaction.response.send_message(
+                    embed=info_embed(
+                        "🌐 Guild only", "You can only post trade offers inside a server."
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            channel_id = await db.get_trade_channel(interaction.guild.id)
+            if channel_id is None:
+                await interaction.response.send_message(
+                    embed=info_embed(
+                        "⚙️ Trade channel not configured",
+                        "An admin needs to run /set_trade_channel to pick where trade posts go.",
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            channel = interaction.client.get_channel(channel_id)
+            if channel is None:
+                try:
+                    channel = await interaction.client.fetch_channel(channel_id)
+                except discord.HTTPException:
+                    channel = None
+
+            if not isinstance(channel, discord.TextChannel):
+                await interaction.response.send_message(
+                    embed=info_embed(
+                        "🚫 Channel unavailable",
+                        "I can't find the configured trade channel. Please ask an admin to set it again.",
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            if image and image.content_type and not image.content_type.startswith("image"):
+                await interaction.response.send_message(
+                    embed=info_embed(
+                        "🖼️ Invalid image",
+                        "The attachment must be an image file (PNG, JPG, GIF).",
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            contact, score, count = await db.profile(interaction.user.id)
+            stock = await db.get_stock(interaction.user.id)
+            wishlist = await db.get_wishlist(interaction.user.id)
+
+            description_lines = [rating_summary(score, count)]
+            if contact:
+                description_lines.append(f"📞 Contact: {contact}")
+            description_lines.append(
+                "Press **Start Trade** below or use `/trade start` to begin a DM with this trader."
+            )
+            embed = info_embed(
+                f"🛍️ Trade post from {interaction.user.display_name}",
+                "\n".join(description_lines),
+            )
+            embed.set_author(
+                name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url
+            )
+            embed.add_field(name="Inventory", value=format_stock(stock), inline=False)
+            embed.add_field(name="Wishlist", value=format_wishlist(wishlist), inline=False)
+            if image:
+                embed.set_image(url=image.url)
+
+            view = TradePostView(db, interaction.user.id, interaction.user.display_name)
+            try:
+                await channel.send(embed=embed, view=view)
+            except discord.HTTPException:
+                await interaction.response.send_message(
+                    embed=info_embed(
+                        "🚫 Cannot post",
+                        f"I don't have permission to send messages in {channel.mention}.",
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "📢 Trade offer posted",
+                    f"Your listing has been shared in {channel.mention}.",
+                ),
+                ephemeral=True,
+            )
+
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot:
             return
@@ -183,42 +300,7 @@ class TradeGroup(app_commands.Group):
         item: str,
         role: app_commands.Choice[str],
     ):
-        await interaction.response.defer(ephemeral=True)
-        if partner.id == interaction.user.id:
-            await interaction.followup.send(
-                embed=info_embed("⚠️ Invalid trade", "You cannot open a trade with yourself."),
-                ephemeral=True,
-            )
-            return
-
-        seller_id = interaction.user.id if role.value == "seller" else partner.id
-        buyer_id = partner.id if role.value == "seller" else interaction.user.id
-        trade_id = await self.db.create_trade(seller_id, buyer_id, item)
-        failed_dm_ids = await send_trade_invites(
-            interaction.client, self.db, trade_id, item, seller_id, buyer_id
-        )
-        if failed_dm_ids:
-            await self.db.delete_trade(trade_id)
-            targets = " and ".join(f"<@{user_id}>" for user_id in failed_dm_ids)
-            await interaction.followup.send(
-                embed=info_embed(
-                    "🚫 Cannot start trade",
-                    (
-                        f"I couldn't DM {targets}. They may have privacy settings or blocks enabled.\n"
-                        "The trade was not started."
-                    ),
-                ),
-                ephemeral=True,
-            )
-            return
-
-        await interaction.followup.send(
-            embed=info_embed(
-                "🤝 Trade opened",
-                f"Trade #{trade_id} created with {partner.mention} for **{item}**. Check your DMs to continue.",
-            ),
-            ephemeral=True,
-        )
+        await start_trade_flow(interaction, self.db, interaction.user, partner, item, role.value)
 
 
 class WishlistGroup(app_commands.Group):
@@ -281,6 +363,61 @@ async def send_trade_invites(
     return failed_ids
 
 
+async def start_trade_flow(
+    interaction: discord.Interaction,
+    db: Database,
+    initiator: discord.abc.User,
+    partner: discord.abc.User,
+    item: str,
+    role_value: str,
+) -> None:
+    await interaction.response.defer(ephemeral=True)
+
+    cleaned_item = item.strip()
+    if not cleaned_item:
+        await interaction.followup.send(
+            embed=info_embed("⚠️ Invalid item", "Please provide an item to trade."),
+            ephemeral=True,
+        )
+        return
+
+    if partner.id == initiator.id:
+        await interaction.followup.send(
+            embed=info_embed("⚠️ Invalid trade", "You cannot open a trade with yourself."),
+            ephemeral=True,
+        )
+        return
+
+    seller_id = initiator.id if role_value == "seller" else partner.id
+    buyer_id = partner.id if role_value == "seller" else initiator.id
+    trade_id = await db.create_trade(seller_id, buyer_id, cleaned_item)
+    failed_dm_ids = await send_trade_invites(
+        interaction.client, db, trade_id, cleaned_item, seller_id, buyer_id
+    )
+    if failed_dm_ids:
+        await db.delete_trade(trade_id)
+        targets = " and ".join(f"<@{user_id}>" for user_id in failed_dm_ids)
+        await interaction.followup.send(
+            embed=info_embed(
+                "🚫 Cannot start trade",
+                (
+                    f"I couldn't DM {targets}. They may have privacy settings or blocks enabled.\n"
+                    "The trade was not started."
+                ),
+            ),
+            ephemeral=True,
+        )
+        return
+
+    await interaction.followup.send(
+        embed=info_embed(
+            "🤝 Trade opened",
+            f"Trade #{trade_id} created with {partner.mention} for **{cleaned_item}**. Check your DMs to continue.",
+        ),
+        ephemeral=True,
+    )
+
+
 async def send_rating_prompts(
     bot: commands.Bot, db: Database, trade_id: int, item: str, seller_id: int, buyer_id: int
 ) -> None:
@@ -311,6 +448,72 @@ class BasePersistentView(discord.ui.View):
     def disable_all_items(self) -> None:
         for item in self.children:
             item.disabled = True
+
+
+class TradeRequestModal(discord.ui.Modal):
+    def __init__(self, db: Database, partner: discord.abc.User):
+        super().__init__(title="Start a trade")
+        self.db = db
+        self.partner = partner
+        self.item_input = discord.ui.TextInput(
+            label="Item you want to trade", placeholder="Ex: Halo Outfit"
+        )
+        self.role_input = discord.ui.TextInput(
+            label="Your role (seller or buyer)",
+            placeholder="Type seller or buyer",
+            max_length=6,
+        )
+        self.add_item(self.item_input)
+        self.add_item(self.role_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        role_value = self.role_input.value.lower().strip()
+        if role_value not in {"seller", "buyer"}:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "⚠️ Invalid role",
+                    "Please enter either 'seller' or 'buyer' for your role.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        await start_trade_flow(
+            interaction, self.db, interaction.user, self.partner, self.item_input.value, role_value
+        )
+
+
+class TradePostView(BasePersistentView):
+    def __init__(self, db: Database, poster_id: int, poster_name: str):
+        super().__init__()
+        self.db = db
+        self.poster_id = poster_id
+        self.poster_name = poster_name
+
+    @discord.ui.button(label="Start Trade", style=discord.ButtonStyle.primary, emoji="🤝")
+    async def start_trade(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if interaction.user.id == self.poster_id:
+            await interaction.response.send_message(
+                embed=info_embed("⚠️ Invalid trade", "You cannot start a trade with yourself."),
+                ephemeral=True,
+            )
+            return
+
+        try:
+            partner = interaction.client.get_user(self.poster_id) or await interaction.client.fetch_user(
+                self.poster_id
+            )
+        except discord.HTTPException:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "🚫 User unavailable",
+                    "I couldn't contact the trader. Please try again later.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_modal(TradeRequestModal(self.db, partner))
 
 
 class TradeView(BasePersistentView):
