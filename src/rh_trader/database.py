@@ -67,7 +67,7 @@ class Database:
                     seller_id INTEGER,
                     buyer_id INTEGER
                 );
-                
+
                 CREATE TABLE IF NOT EXISTS trade_feedback (
                     trade_id INTEGER NOT NULL,
                     rater_id INTEGER NOT NULL,
@@ -80,6 +80,11 @@ class Database:
                 CREATE TABLE IF NOT EXISTS guild_settings (
                     guild_id INTEGER PRIMARY KEY,
                     trade_channel_id INTEGER
+                );
+
+                CREATE TABLE IF NOT EXISTS active_trades (
+                    user_id INTEGER PRIMARY KEY,
+                    trade_id INTEGER NOT NULL
                 );
                 """
             )
@@ -265,6 +270,39 @@ class Database:
                 await db.commit()
                 return cursor.lastrowid
 
+    async def set_active_trade(self, user_id: int, trade_id: int) -> bool:
+        """Mark a trade as the active DM context for a participant."""
+
+        async with self._lock:
+            async with self._connect() as db:
+                cursor = await db.execute(
+                    "SELECT status FROM trades WHERE id = ? AND (seller_id = ? OR buyer_id = ?)",
+                    (trade_id, user_id, user_id),
+                )
+                row = await cursor.fetchone()
+                if row is None or row[0] != "open":
+                    return False
+
+                await db.execute(
+                    "INSERT INTO active_trades(user_id, trade_id) VALUES (?, ?)\n"
+                    "ON CONFLICT(user_id) DO UPDATE SET trade_id = excluded.trade_id",
+                    (user_id, trade_id),
+                )
+                await db.commit()
+                return True
+
+    async def clear_active_trade(self, user_id: int, trade_id: Optional[int] = None) -> None:
+        async with self._lock:
+            async with self._connect() as db:
+                if trade_id is None:
+                    await db.execute("DELETE FROM active_trades WHERE user_id = ?", (user_id,))
+                else:
+                    await db.execute(
+                        "DELETE FROM active_trades WHERE user_id = ? AND trade_id = ?",
+                        (user_id, trade_id),
+                    )
+                await db.commit()
+
     async def delete_trade(self, trade_id: int) -> None:
         async with self._lock:
             async with self._connect() as db:
@@ -300,6 +338,27 @@ class Database:
             )
             return await cursor.fetchone()
 
+    async def get_active_trade_for_user(
+        self, user_id: int
+    ) -> Tuple[int, int, int, str, str] | None:
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "SELECT t.id, t.seller_id, t.buyer_id, t.item, t.status\n"
+                "FROM active_trades a JOIN trades t ON a.trade_id = t.id\n"
+                "WHERE a.user_id = ?",
+                (user_id,),
+            )
+            row = await cursor.fetchone()
+
+        if row is None:
+            return None
+
+        trade_id, seller_id, buyer_id, item, status = row
+        if status != "open" or user_id not in (seller_id, buyer_id):
+            await self.clear_active_trade(user_id, trade_id)
+            return None
+        return row
+
     async def latest_open_trade_for_user(self, user_id: int) -> Tuple[int, int, int, str, str] | None:
         async with self._connect() as db:
             cursor = await db.execute(
@@ -309,6 +368,17 @@ class Database:
                 (user_id, user_id),
             )
             return await cursor.fetchone()
+
+    async def list_open_trades_for_user(
+        self, user_id: int
+    ) -> List[Tuple[int, int, int, str, str]]:
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "SELECT id, seller_id, buyer_id, item, status FROM trades\n"
+                "WHERE status = 'open' AND (seller_id = ? OR buyer_id = ?) ORDER BY id DESC",
+                (user_id, user_id),
+            )
+            return await cursor.fetchall()
 
     async def record_trade_rating(
         self, trade_id: int, rater_id: int, partner_id: int, score: int, role: str
