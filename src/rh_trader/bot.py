@@ -209,9 +209,25 @@ class TraderBot(commands.Bot):
         await super().on_message(message)
         if not isinstance(message.channel, discord.DMChannel):
             return
-        trade = await self.db.latest_open_trade_for_user(message.author.id)
+        trade = await self.db.get_active_trade_for_user(message.author.id)
         if not trade:
-            return
+            open_trades = await self.db.list_open_trades_for_user(message.author.id)
+            if not open_trades:
+                return
+            if len(open_trades) > 1:
+                await message.channel.send(
+                    embed=info_embed(
+                        "🎯 Pick an active trade",
+                        (
+                            "You have multiple open trades. Use the **Set Active Trade** button"
+                            " on the trade card you want to chat about so I know who to DM."
+                        ),
+                    ),
+                    reference=message,
+                )
+                return
+            trade = open_trades[0]
+            await self.db.set_active_trade(message.author.id, trade[0])
         trade_id, seller_id, buyer_id, item, _ = trade
         partner_id = buyer_id if message.author.id == seller_id else seller_id
         try:
@@ -391,6 +407,8 @@ async def start_trade_flow(
     seller_id = initiator.id if role_value == "seller" else partner.id
     buyer_id = partner.id if role_value == "seller" else initiator.id
     trade_id = await db.create_trade(seller_id, buyer_id, cleaned_item)
+    await db.set_active_trade(seller_id, trade_id)
+    await db.set_active_trade(buyer_id, trade_id)
     failed_dm_ids = await send_trade_invites(
         interaction.client, db, trade_id, cleaned_item, seller_id, buyer_id
     )
@@ -567,6 +585,30 @@ class TradeView(BasePersistentView):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return await self._ensure_open(interaction)
 
+    @discord.ui.button(label="Set Active Trade", style=discord.ButtonStyle.primary, emoji="🎯")
+    async def set_active_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if not await self._ensure_open(interaction):
+            return
+
+        saved = await self.db.set_active_trade(interaction.user.id, self.trade_id)
+        if not saved:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "🚫 Trade not active",
+                    "I couldn't mark this trade as active. Make sure it's still open.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message(
+            embed=info_embed(
+                "🎯 Active trade set",
+                "I'll forward your DM replies to this trade partner.",
+            ),
+            ephemeral=True,
+        )
+
     @discord.ui.button(label="Mark Trade Completed", style=discord.ButtonStyle.green, emoji="✅")
     async def complete_button(self, interaction: discord.Interaction, _: discord.ui.Button):
         if not await self._ensure_open(interaction):
@@ -593,6 +635,8 @@ class TradeView(BasePersistentView):
             embed=info_embed("✅ Trade completed", f"Trade #{self.trade_id} for **{self.item}** is now complete."),
             ephemeral=True,
         )
+        await self.db.clear_active_trade(self.seller_id, self.trade_id)
+        await self.db.clear_active_trade(self.buyer_id, self.trade_id)
         await send_rating_prompts(interaction.client, self.db, self.trade_id, self.item, self.seller_id, self.buyer_id)
 
     @discord.ui.button(label="Cancel Trade", style=discord.ButtonStyle.danger, emoji="🛑")
@@ -626,6 +670,8 @@ class TradeView(BasePersistentView):
             ),
             ephemeral=True,
         )
+        await self.db.clear_active_trade(self.seller_id, self.trade_id)
+        await self.db.clear_active_trade(self.buyer_id, self.trade_id)
 
 
 class RatingView(BasePersistentView):
