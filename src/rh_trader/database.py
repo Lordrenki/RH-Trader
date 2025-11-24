@@ -82,6 +82,14 @@ class Database:
                     trade_channel_id INTEGER
                 );
 
+                CREATE TABLE IF NOT EXISTS trade_posts (
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    channel_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    PRIMARY KEY (guild_id, user_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS active_trades (
                     user_id INTEGER PRIMARY KEY,
                     trade_id INTEGER NOT NULL
@@ -476,6 +484,33 @@ class Database:
         async with self._lock:
             async with self._connect() as db:
                 await db.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
+                await db.commit()
+
+    async def get_trade_post(self, guild_id: int, user_id: int) -> Tuple[int, int] | None:
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "SELECT channel_id, message_id FROM trade_posts WHERE guild_id = ? AND user_id = ?",
+                (guild_id, user_id),
+            )
+            return await cursor.fetchone()
+
+    async def save_trade_post(self, guild_id: int, user_id: int, channel_id: int, message_id: int) -> None:
+        async with self._lock:
+            async with self._connect() as db:
+                await db.execute(
+                    "INSERT INTO trade_posts(guild_id, user_id, channel_id, message_id) VALUES (?, ?, ?, ?)\n"
+                    "ON CONFLICT(guild_id, user_id) DO UPDATE SET channel_id = excluded.channel_id, message_id = excluded.message_id",
+                    (guild_id, user_id, channel_id, message_id),
+                )
+                await db.commit()
+
+    async def delete_trade_post(self, guild_id: int, user_id: int) -> None:
+        async with self._lock:
+            async with self._connect() as db:
+                await db.execute(
+                    "DELETE FROM trade_posts WHERE guild_id = ? AND user_id = ?",
+                    (guild_id, user_id),
+                )
                 await db.commit()
 
     async def dump_state(self) -> Iterable[Tuple[str, Tuple]]:

@@ -183,8 +183,32 @@ class TraderBot(commands.Bot):
                 embed.set_image(url=image.url)
 
             view = TradePostView(db, interaction.user.id, interaction.user.display_name)
+            previous_post = await db.get_trade_post(interaction.guild.id, interaction.user.id)
+            if previous_post:
+                prev_channel_id, prev_message_id = previous_post
+                prev_channel = interaction.client.get_channel(prev_channel_id)
+                if prev_channel is None:
+                    try:
+                        prev_channel = await interaction.client.fetch_channel(prev_channel_id)
+                    except discord.HTTPException:
+                        prev_channel = None
+
+                if isinstance(prev_channel, discord.TextChannel):
+                    try:
+                        message_to_delete = await prev_channel.fetch_message(prev_message_id)
+                        await message_to_delete.delete()
+                    except discord.NotFound:
+                        await db.delete_trade_post(interaction.guild.id, interaction.user.id)
+                    except discord.HTTPException:
+                        _log.warning(
+                            "Failed to delete previous trade post %s for user %s in guild %s",
+                            prev_message_id,
+                            interaction.user.id,
+                            interaction.guild.id,
+                        )
+
             try:
-                await channel.send(embed=embed, view=view)
+                message = await channel.send(embed=embed, view=view)
             except discord.HTTPException:
                 await interaction.response.send_message(
                     embed=info_embed(
@@ -201,6 +225,9 @@ class TraderBot(commands.Bot):
                     f"Your listing has been shared in {channel.mention}.",
                 ),
                 ephemeral=True,
+            )
+            await db.save_trade_post(
+                interaction.guild.id, interaction.user.id, channel.id, message.id
             )
 
     async def on_message(self, message: discord.Message) -> None:
