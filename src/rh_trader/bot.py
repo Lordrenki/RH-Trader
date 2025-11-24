@@ -398,6 +398,15 @@ async def send_trade_invites(
         try:
             user = bot.get_user(user_id) or await bot.fetch_user(user_id)
             is_seller = user_id == seller_id
+            stats_line = ""
+            if is_seller and status == "pending":
+                _, score, rating_count = await db.profile(partner_id)
+                trades = await db.trade_count(partner_id)
+                trade_label = "trade" if trades == 1 else "trades"
+                stats_line = (
+                    f"\nTrader stats for <@{partner_id}>: {rating_summary(score, rating_count)}"
+                    f" • {trades} {trade_label} completed."
+                )
             pending_note = (
                 "\nPress **Accept Trade** to start or **Reject Trade** to decline."
                 if is_seller and status == "pending"
@@ -410,6 +419,7 @@ async def send_trade_invites(
                         f"You are the **{role_label}** for **{item}** with <@{partner_id}>.\n"
                         "Reply in this DM to send messages to your partner."
                         f"{pending_note}"
+                        f"{stats_line}"
                     ),
                 ),
                 view=TradeView(

@@ -478,6 +478,15 @@ class Database:
             row = await cursor.fetchone()
             return row or ("", 0.0, 0)
 
+    async def trade_count(self, user_id: int) -> int:
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM trades WHERE seller_id = ? OR buyer_id = ?",
+                (user_id, user_id),
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else 0
+
     async def clear_history(self, table: str, user_id: int) -> None:
         if table not in {"offers", "requests"}:
             raise ValueError("Invalid table name for clearing history")
