@@ -264,11 +264,35 @@ class Database:
             async with self._connect() as db:
                 cursor = await db.execute(
                     "INSERT INTO trades(user_id, partner_id, item, status, seller_id, buyer_id)\n"
-                    "VALUES (?, ?, ?, 'open', ?, ?)",
+                    "VALUES (?, ?, ?, 'pending', ?, ?)",
                     (seller_id, buyer_id, item.strip(), seller_id, buyer_id),
                 )
                 await db.commit()
                 return cursor.lastrowid
+
+    async def accept_trade(self, trade_id: int, seller_id: int) -> bool:
+        """Mark a pending trade as accepted by the seller."""
+
+        async with self._lock:
+            async with self._connect() as db:
+                cursor = await db.execute(
+                    "UPDATE trades SET status = 'open' WHERE id = ? AND seller_id = ? AND status = 'pending'",
+                    (trade_id, seller_id),
+                )
+                await db.commit()
+                return cursor.rowcount > 0
+
+    async def reject_trade(self, trade_id: int, seller_id: int) -> bool:
+        """Allow the seller to reject a pending trade offer."""
+
+        async with self._lock:
+            async with self._connect() as db:
+                cursor = await db.execute(
+                    "UPDATE trades SET status = 'rejected' WHERE id = ? AND seller_id = ? AND status = 'pending'",
+                    (trade_id, seller_id),
+                )
+                await db.commit()
+                return cursor.rowcount > 0
 
     async def set_active_trade(self, user_id: int, trade_id: int) -> bool:
         """Mark a trade as the active DM context for a participant."""
@@ -324,7 +348,7 @@ class Database:
         async with self._lock:
             async with self._connect() as db:
                 cursor = await db.execute(
-                    "UPDATE trades SET status = 'cancelled' WHERE id = ? AND status = 'open'",
+                    "UPDATE trades SET status = 'cancelled' WHERE id = ? AND status IN ('open', 'pending')",
                     (trade_id,),
                 )
                 await db.commit()

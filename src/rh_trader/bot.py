@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import discord
 from discord import app_commands
@@ -355,7 +355,14 @@ class WishlistGroup(app_commands.Group):
 
 
 async def send_trade_invites(
-    bot: commands.Bot, db: Database, trade_id: int, item: str, seller_id: int, buyer_id: int
+    bot: commands.Bot,
+    db: Database,
+    trade_id: int,
+    item: str,
+    seller_id: int,
+    buyer_id: int,
+    *,
+    status: str = "pending",
 ) -> List[int]:
     failed_ids: List[int] = []
     for user_id in (seller_id, buyer_id):
@@ -363,15 +370,30 @@ async def send_trade_invites(
         partner_id = buyer_id if user_id == seller_id else seller_id
         try:
             user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+            is_seller = user_id == seller_id
+            pending_note = (
+                "\nPress **Accept Trade** to start or **Reject Trade** to decline."
+                if is_seller and status == "pending"
+                else "\nWaiting for the seller to accept the trade."
+            )
             await user.send(
                 embed=info_embed(
                     f"🤝 Trade #{trade_id} started",
                     (
                         f"You are the **{role_label}** for **{item}** with <@{partner_id}>.\n"
                         "Reply in this DM to send messages to your partner."
+                        f"{pending_note}"
                     ),
                 ),
-                view=TradeView(db, trade_id, seller_id, buyer_id, item),
+                view=TradeView(
+                    db,
+                    trade_id,
+                    seller_id,
+                    buyer_id,
+                    item,
+                    is_seller=is_seller,
+                    status=status,
+                ),
             )
         except (discord.Forbidden, discord.HTTPException):
             failed_ids.append(user_id)
@@ -407,8 +429,6 @@ async def start_trade_flow(
     seller_id = initiator.id if role_value == "seller" else partner.id
     buyer_id = partner.id if role_value == "seller" else initiator.id
     trade_id = await db.create_trade(seller_id, buyer_id, cleaned_item)
-    await db.set_active_trade(seller_id, trade_id)
-    await db.set_active_trade(buyer_id, trade_id)
     failed_dm_ids = await send_trade_invites(
         interaction.client, db, trade_id, cleaned_item, seller_id, buyer_id
     )
@@ -535,15 +555,40 @@ class TradePostView(BasePersistentView):
 
 
 class TradeView(BasePersistentView):
-    def __init__(self, db: Database, trade_id: int, seller_id: int, buyer_id: int, item: str):
+    def __init__(
+        self,
+        db: Database,
+        trade_id: int,
+        seller_id: int,
+        buyer_id: int,
+        item: str,
+        *,
+        is_seller: bool,
+        status: str = "pending",
+    ):
         super().__init__()
         self.db = db
         self.trade_id = trade_id
         self.seller_id = seller_id
         self.buyer_id = buyer_id
         self.item = item
+        self.is_seller = is_seller
+        self.status = status
+        self._configure_buttons()
 
-    async def _ensure_open(self, interaction: discord.Interaction) -> bool:
+    def _configure_buttons(self) -> None:
+        pending = self.status == "pending"
+        open_status = self.status == "open"
+        closed = self.status in {"completed", "cancelled", "rejected"}
+
+        # Buttons that should only work after acceptance
+        self.set_active_button.disabled = not open_status
+        self.complete_button.disabled = not open_status
+        self.cancel_button.disabled = closed
+        self.accept_button.disabled = not (pending and self.is_seller)
+        self.reject_button.disabled = not (pending and self.is_seller)
+
+    async def _get_trade(self, interaction: discord.Interaction) -> Tuple[int, int, int, str, str] | None:
         trade = await self.db.get_trade(self.trade_id)
         if not trade:
             await interaction.response.send_message(
@@ -553,24 +598,29 @@ class TradeView(BasePersistentView):
                 ),
                 ephemeral=True,
             )
-            return False
+            return None
 
         _, seller_id, buyer_id, _, status = trade
+        self.seller_id = seller_id
+        self.buyer_id = buyer_id
+        self.status = status
+        self._configure_buttons()
+
         if interaction.user.id not in {seller_id, buyer_id}:
             await interaction.response.send_message(
                 embed=info_embed("🚫 Not your trade", "Only participants can manage this trade."),
                 ephemeral=True,
             )
-            return False
+            return None
 
-        if status != "open":
+        if status in {"cancelled", "completed", "rejected"}:
             self.disable_all_items()
             try:
                 await interaction.message.edit(view=self)
             except discord.HTTPException:
                 pass
 
-            status_label = "completed" if status == "completed" else "cancelled"
+            status_label = status
             await interaction.response.send_message(
                 embed=info_embed(
                     "ℹ️ Trade closed",
@@ -578,16 +628,26 @@ class TradeView(BasePersistentView):
                 ),
                 ephemeral=True,
             )
-            return False
+            return None
 
-        return True
+        return trade
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        return await self._ensure_open(interaction)
+        return await self._get_trade(interaction) is not None
 
     @discord.ui.button(label="Set Active Trade", style=discord.ButtonStyle.primary, emoji="🎯")
     async def set_active_button(self, interaction: discord.Interaction, _: discord.ui.Button):
-        if not await self._ensure_open(interaction):
+        trade = await self._get_trade(interaction)
+        if trade is None:
+            return
+        if self.status != "open":
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "⏳ Waiting for acceptance",
+                    "The seller must accept the trade before you can set it as active.",
+                ),
+                ephemeral=True,
+            )
             return
 
         saved = await self.db.set_active_trade(interaction.user.id, self.trade_id)
@@ -611,7 +671,17 @@ class TradeView(BasePersistentView):
 
     @discord.ui.button(label="Mark Trade Completed", style=discord.ButtonStyle.green, emoji="✅")
     async def complete_button(self, interaction: discord.Interaction, _: discord.ui.Button):
-        if not await self._ensure_open(interaction):
+        trade = await self._get_trade(interaction)
+        if trade is None:
+            return
+        if self.status != "open":
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "⏳ Waiting for acceptance",
+                    "The seller must accept the trade before completing it.",
+                ),
+                ephemeral=True,
+            )
             return
 
         updated = await self.db.complete_trade(self.trade_id)
@@ -641,7 +711,8 @@ class TradeView(BasePersistentView):
 
     @discord.ui.button(label="Cancel Trade", style=discord.ButtonStyle.danger, emoji="🛑")
     async def cancel_button(self, interaction: discord.Interaction, _: discord.ui.Button):
-        if not await self._ensure_open(interaction):
+        trade = await self._get_trade(interaction)
+        if trade is None:
             return
 
         cancelled = await self.db.cancel_trade(self.trade_id)
@@ -672,6 +743,124 @@ class TradeView(BasePersistentView):
         )
         await self.db.clear_active_trade(self.seller_id, self.trade_id)
         await self.db.clear_active_trade(self.buyer_id, self.trade_id)
+
+    @discord.ui.button(label="Accept Trade", style=discord.ButtonStyle.success, emoji="✅")
+    async def accept_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        trade = await self._get_trade(interaction)
+        if trade is None:
+            return
+
+        if interaction.user.id != self.seller_id:
+            await interaction.response.send_message(
+                embed=info_embed("🚫 Seller only", "Only the seller can accept this trade."),
+                ephemeral=True,
+            )
+            return
+
+        accepted = await self.db.accept_trade(self.trade_id, self.seller_id)
+        if not accepted:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "❌ Cannot accept",
+                    "This trade may have already been accepted, rejected, or cancelled.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        self.status = "open"
+        self._configure_buttons()
+        try:
+            await interaction.message.edit(view=self)
+        except discord.HTTPException:
+            pass
+
+        await self.db.set_active_trade(self.seller_id, self.trade_id)
+        await self.db.set_active_trade(self.buyer_id, self.trade_id)
+
+        await interaction.response.send_message(
+            embed=info_embed(
+                "✅ Trade accepted",
+                "You can now chat in this DM and mark the trade active when ready.",
+            ),
+            ephemeral=True,
+        )
+
+        try:
+            partner = interaction.client.get_user(self.buyer_id) or await interaction.client.fetch_user(
+                self.buyer_id
+            )
+            await partner.send(
+                embed=info_embed(
+                    f"✅ Trade #{self.trade_id} accepted",
+                    (
+                        f"<@{self.seller_id}> accepted the trade for **{self.item}**.\n"
+                        "Use the buttons below to set this as your active DM thread or close it."
+                    ),
+                ),
+                view=TradeView(
+                    self.db,
+                    self.trade_id,
+                    self.seller_id,
+                    self.buyer_id,
+                    self.item,
+                    is_seller=False,
+                    status="open",
+                ),
+            )
+        except discord.HTTPException:
+            _log.warning("Failed to notify buyer %s about accepted trade %s", self.buyer_id, self.trade_id)
+
+    @discord.ui.button(label="Reject Trade", style=discord.ButtonStyle.secondary, emoji="🚫")
+    async def reject_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        trade = await self._get_trade(interaction)
+        if trade is None:
+            return
+
+        if interaction.user.id != self.seller_id:
+            await interaction.response.send_message(
+                embed=info_embed("🚫 Seller only", "Only the seller can reject this trade."),
+                ephemeral=True,
+            )
+            return
+
+        rejected = await self.db.reject_trade(self.trade_id, self.seller_id)
+        if not rejected:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "❌ Cannot reject",
+                    "This trade may have already been accepted, rejected, or cancelled.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        self.status = "rejected"
+        self.disable_all_items()
+        try:
+            await interaction.message.edit(view=self)
+        except discord.HTTPException:
+            pass
+
+        await interaction.response.send_message(
+            embed=info_embed(
+                "🚫 Trade rejected", f"You rejected trade #{self.trade_id} for **{self.item}**."
+            ),
+            ephemeral=True,
+        )
+
+        try:
+            partner = interaction.client.get_user(self.buyer_id) or await interaction.client.fetch_user(
+                self.buyer_id
+            )
+            await partner.send(
+                embed=info_embed(
+                    f"🚫 Trade #{self.trade_id} rejected",
+                    f"The seller declined the trade for **{self.item}**.",
+                )
+            )
+        except discord.HTTPException:
+            _log.warning("Failed to notify buyer %s about rejected trade %s", self.buyer_id, self.trade_id)
 
 
 class RatingView(BasePersistentView):
