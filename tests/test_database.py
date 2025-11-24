@@ -90,6 +90,9 @@ async def test_trade_flow(tmp_path: Path):
     trade = await db.get_trade(trade_id)
     assert trade == (trade_id, 5, 6, "Rare Item", "pending")
 
+    assert await db.trade_count(5) == 1
+    assert await db.trade_count(6) == 1
+
     # Buyer shouldn't see the trade as open until the seller accepts
     assert await db.latest_open_trade_for_user(6) is None
 
