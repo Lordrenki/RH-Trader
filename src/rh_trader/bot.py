@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from typing import List, Optional, Tuple
+from typing import Awaitable, Callable, List, Optional, Sequence, Tuple
 
 import discord
 from discord import app_commands
@@ -62,6 +62,21 @@ class TraderBot(commands.Bot):
             ) or "No matching items found."
             embed = info_embed("🔎 Search results", description)
             await interaction.response.send_message(embed=embed)
+
+        @self.tree.command(description="Open a quick inventory control panel")
+        async def inventory(interaction: discord.Interaction):
+            embed = info_embed(
+                "🧰 Inventory hub",
+                (
+                    "Use the buttons below to update stock and wishlist entries without typing"
+                    " slash commands."
+                ),
+            )
+            await interaction.response.send_message(
+                embed=embed,
+                view=InventoryHubView(self.db, self.catalog),
+                ephemeral=True,
+            )
 
         @self.tree.command(description="Show a trading profile")
         @app_commands.describe(user="Optionally view another member's profile")
@@ -415,6 +430,316 @@ class WishlistGroup(app_commands.Group):
         message = "Wishlist item removed." if removed else "Item not found on your wishlist."
         embed = info_embed("🧹 Wishlist cleanup", message)
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+def _normalize_catalog_options(suggestions: Sequence[str], fallback: str | None = None) -> List[tuple[str, str]]:
+    """Return up to 25 unique option tuples for a select menu.
+
+    The value is the normalized item name; the label is truncated to fit Discord's
+    component limits.
+    """
+
+    seen = set()
+    options: List[tuple[str, str]] = []
+    for suggestion in suggestions:
+        normalized = suggestion.strip()
+        if not normalized:
+            continue
+        key = normalized.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        label = normalized[:100]
+        options.append((label, normalized))
+        if len(options) >= 25:
+            return options
+
+    if fallback:
+        normalized_fallback = fallback.strip()
+        if normalized_fallback:
+            key = normalized_fallback.lower()
+            if key not in seen:
+                options.append((normalized_fallback[:100], normalized_fallback))
+
+    return options[:25]
+
+
+class CatalogChoiceView(discord.ui.View):
+    def __init__(
+        self,
+        options: Sequence[tuple[str, str]],
+        on_select: Callable[[discord.Interaction, str], Awaitable[None]],
+        *,
+        placeholder: str,
+    ) -> None:
+        super().__init__(timeout=180)
+        select = discord.ui.Select(
+            placeholder=placeholder,
+            options=[discord.SelectOption(label=label, value=value) for label, value in options],
+        )
+        self.add_item(select)
+        self._on_select = on_select
+
+        async def handle(interaction: discord.Interaction) -> None:
+            choice = select.values[0]
+            await self._on_select(interaction, choice)
+
+        select.callback = handle  # type: ignore[assignment]
+
+
+class ConfirmClearView(discord.ui.View):
+    def __init__(self, on_confirm: Callable[[discord.Interaction], Awaitable[None]]):
+        super().__init__(timeout=60)
+        self._on_confirm = on_confirm
+
+    @discord.ui.button(label="Yes, clear it", style=discord.ButtonStyle.danger, emoji="🗑️")
+    async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._on_confirm(interaction)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="↩️")
+    async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=info_embed("Inventory unchanged", "No items were removed."), view=None
+        )
+
+
+class StockAddModal(discord.ui.Modal):
+    def __init__(self, db: Database, catalog: CatalogClient):
+        super().__init__(title="Add to stock")
+        self.db = db
+        self.catalog = catalog
+        self.item_input = discord.ui.TextInput(
+            label="Item",
+            placeholder="Start typing to search the catalog",
+            max_length=100,
+        )
+        self.quantity_input = discord.ui.TextInput(
+            label="Quantity",
+            placeholder="1",
+            default="1",
+            max_length=5,
+        )
+        self.add_item(self.item_input)
+        self.add_item(self.quantity_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        raw_qty = (self.quantity_input.value or "1").strip()
+        try:
+            qty = int(raw_qty)
+        except ValueError:
+            qty = 1
+        qty = max(1, qty)
+        search_term = self.item_input.value.strip()
+        suggestions = await self.catalog.search_items(search_term, limit=25)
+        options = _normalize_catalog_options(suggestions, fallback=search_term)
+
+        if not options:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "⚠️ No matches",
+                    "Try again with a more specific name to see catalog suggestions.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        async def finalize(inter: discord.Interaction, choice: str) -> None:
+            await self.db.add_stock(inter.user.id, choice, qty)
+            embed = info_embed(
+                "📦 Stock updated", f"Added **{choice}** x{qty} to your inventory."
+            )
+            await inter.response.edit_message(embed=embed, view=None)
+
+        view = CatalogChoiceView(
+            options,
+            finalize,
+            placeholder="Choose the item to add",
+        )
+        embed = info_embed(
+            "🔎 Pick your item",
+            "Select the exact catalog match below to finish adding it.",
+        )
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+class WishlistAddModal(discord.ui.Modal):
+    def __init__(self, db: Database, catalog: CatalogClient):
+        super().__init__(title="Add to wishlist")
+        self.db = db
+        self.catalog = catalog
+        self.item_input = discord.ui.TextInput(
+            label="Item",
+            placeholder="Search the catalog",
+            max_length=100,
+        )
+        self.note_input = discord.ui.TextInput(
+            label="Note (optional)",
+            required=False,
+            style=discord.TextStyle.paragraph,
+            max_length=200,
+            placeholder="Target price or extra details",
+        )
+        self.add_item(self.item_input)
+        self.add_item(self.note_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        search_term = self.item_input.value.strip()
+        note = (self.note_input.value or "").strip()
+        suggestions = await self.catalog.search_items(search_term, limit=25)
+        options = _normalize_catalog_options(suggestions, fallback=search_term)
+
+        if not options:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "⚠️ No matches",
+                    "Try again with a more specific name to see catalog suggestions.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        async def finalize(inter: discord.Interaction, choice: str) -> None:
+            await self.db.add_wishlist(inter.user.id, choice, note)
+            embed = info_embed(
+                "🎯 Wishlist updated",
+                f"Added **{choice}** to your wishlist." + (f" Note: {note}" if note else ""),
+            )
+            await inter.response.edit_message(embed=embed, view=None)
+
+        view = CatalogChoiceView(
+            options,
+            finalize,
+            placeholder="Choose the item to watch",
+        )
+        embed = info_embed(
+            "🔎 Pick your item",
+            "Select the closest catalog match below.",
+        )
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+class InventoryHubView(discord.ui.View):
+    def __init__(self, db: Database, catalog: CatalogClient):
+        super().__init__(timeout=600)
+        self.db = db
+        self.catalog = catalog
+
+    async def _send_stock_removal(self, interaction: discord.Interaction) -> None:
+        items = await self.db.get_stock(interaction.user.id)
+        if not items:
+            await interaction.response.send_message(
+                embed=info_embed("No stock found", "Add something first to remove it."),
+                ephemeral=True,
+            )
+            return
+
+        options = _normalize_catalog_options(
+            [f"{item} (x{qty})" for item, qty in items],
+            fallback=None,
+        )
+
+        async def finalize(inter: discord.Interaction, choice: str) -> None:
+            item_name = choice.split(" (")[0]
+            removed = await self.db.remove_stock(inter.user.id, item_name)
+            message = (
+                f"Removed **{item_name}** from your stock." if removed else "Item not found anymore."
+            )
+            await inter.response.edit_message(embed=info_embed("🧹 Stock cleanup", message), view=None)
+
+        view = CatalogChoiceView(
+            options,
+            finalize,
+            placeholder="Select a stock item to remove",
+        )
+        await interaction.response.send_message(
+            embed=info_embed("Remove stock", "Pick an item to delete."),
+            view=view,
+            ephemeral=True,
+        )
+
+    async def _send_wishlist_removal(self, interaction: discord.Interaction) -> None:
+        items = await self.db.get_wishlist(interaction.user.id)
+        if not items:
+            await interaction.response.send_message(
+                embed=info_embed("No wishlist items", "Add items before removing them."),
+                ephemeral=True,
+            )
+            return
+
+        options = _normalize_catalog_options([item for item, _ in items])
+
+        async def finalize(inter: discord.Interaction, choice: str) -> None:
+            removed = await self.db.remove_wishlist(inter.user.id, choice)
+            message = (
+                f"Removed **{choice}** from your wishlist." if removed else "Item not found anymore."
+            )
+            await inter.response.edit_message(
+                embed=info_embed("🧹 Wishlist cleanup", message), view=None
+            )
+
+        view = CatalogChoiceView(
+            options,
+            finalize,
+            placeholder="Select a wishlist item to remove",
+        )
+        await interaction.response.send_message(
+            embed=info_embed("Remove wishlist item", "Pick what you want to drop."),
+            view=view,
+            ephemeral=True,
+        )
+
+    async def _send_snapshot(self, interaction: discord.Interaction) -> None:
+        stock = await self.db.get_stock(interaction.user.id)
+        wishlist = await self.db.get_wishlist(interaction.user.id)
+        embed = info_embed(
+            "📋 Your inventory snapshot",
+            "Quick view of your lists.",
+        )
+        embed.add_field(name="Inventory", value=format_stock(stock), inline=False)
+        embed.add_field(name="Wishlist", value=format_wishlist(wishlist), inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Add Stock", style=discord.ButtonStyle.primary, emoji="➕")
+    async def add_stock(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(StockAddModal(self.db, self.catalog))
+
+    @discord.ui.button(label="Remove Stock", style=discord.ButtonStyle.secondary, emoji="➖")
+    async def remove_stock(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._send_stock_removal(interaction)
+
+    @discord.ui.button(label="Clear Stock", style=discord.ButtonStyle.danger, emoji="🗑️")
+    async def clear_stock(self, interaction: discord.Interaction, _: discord.ui.Button):
+        async def confirm(inter: discord.Interaction) -> None:
+            await self.db.clear_stock(inter.user.id)
+            await inter.response.edit_message(
+                embed=info_embed("🗑️ Stock cleared", "Your inventory list is now empty."),
+                view=None,
+            )
+
+        view = ConfirmClearView(confirm)
+        await interaction.response.send_message(
+            embed=info_embed("Confirm", "This will remove all stock entries."),
+            view=view,
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Add Wishlist", style=discord.ButtonStyle.primary, emoji="📌")
+    async def add_wishlist(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(WishlistAddModal(self.db, self.catalog))
+
+    @discord.ui.button(label="Remove Wishlist", style=discord.ButtonStyle.secondary, emoji="📭")
+    async def remove_wishlist(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._send_wishlist_removal(interaction)
+
+    @discord.ui.button(label="View Lists", style=discord.ButtonStyle.success, emoji="📋")
+    async def view_lists(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._send_snapshot(interaction)
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.secondary, emoji="🚪")
+    async def close(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=info_embed("Closed", "You can reopen /inventory anytime."), view=None
+        )
 
 
 async def send_trade_invites(
