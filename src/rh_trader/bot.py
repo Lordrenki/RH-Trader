@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-from difflib import SequenceMatcher
 from typing import Awaitable, Callable, List, Optional, Sequence, Tuple
 
 import discord
@@ -465,33 +464,6 @@ def _normalize_catalog_options(suggestions: Sequence[str], fallback: str | None 
     return options[:25]
 
 
-def _rank_catalog_suggestions(search_term: str, suggestions: Sequence[str]) -> List[str]:
-    """Order catalog results so the closest matches appear first."""
-
-    cleaned = search_term.strip().lower()
-    if not cleaned:
-        return list(suggestions)
-
-    scored: List[tuple[float, float, int, str]] = []
-    for idx, name in enumerate(suggestions):
-        lowered = name.lower()
-        if not lowered:
-            continue
-        if lowered == cleaned:
-            base = 3
-        elif lowered.startswith(cleaned):
-            base = 2
-        elif cleaned in lowered:
-            base = 1
-        else:
-            base = 0
-        similarity = SequenceMatcher(None, cleaned, lowered).ratio()
-        scored.append((base, similarity, -idx, name))
-
-    scored.sort(key=lambda entry: (entry[0], entry[1], entry[2]), reverse=True)
-    return [name for *_, name in scored]
-
-
 class CatalogChoiceView(discord.ui.View):
     def __init__(
         self,
@@ -559,8 +531,7 @@ class StockAddModal(discord.ui.Modal):
         qty = max(1, qty)
         search_term = self.item_input.value.strip()
         suggestions = await self.catalog.search_items(search_term, limit=25)
-        ranked = _rank_catalog_suggestions(search_term, suggestions)
-        options = _normalize_catalog_options(ranked, fallback=search_term)
+        options = _normalize_catalog_options(suggestions, fallback=search_term)
 
         if not options:
             await interaction.response.send_message(
@@ -615,8 +586,7 @@ class WishlistAddModal(discord.ui.Modal):
         search_term = self.item_input.value.strip()
         note = (self.note_input.value or "").strip()
         suggestions = await self.catalog.search_items(search_term, limit=25)
-        ranked = _rank_catalog_suggestions(search_term, suggestions)
-        options = _normalize_catalog_options(ranked, fallback=search_term)
+        options = _normalize_catalog_options(suggestions, fallback=search_term)
 
         if not options:
             await interaction.response.send_message(
