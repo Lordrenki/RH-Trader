@@ -13,6 +13,7 @@ class Settings:
 
     discord_token: str
     database_path: str = "data/trader.db"
+    catalog_base_url: str = "https://ardb.app"
 
 
 def load_settings() -> Settings:
@@ -27,4 +28,7 @@ def load_settings() -> Settings:
         raise RuntimeError("DISCORD_TOKEN is required to run the bot")
 
     db_path = os.getenv("TRADER_DB_PATH", "data/trader.db")
-    return Settings(discord_token=token, database_path=db_path)
+    catalog_base_url = os.getenv("CATALOG_BASE_URL", "https://ardb.app")
+    return Settings(
+        discord_token=token, database_path=db_path, catalog_base_url=catalog_base_url
+    )
