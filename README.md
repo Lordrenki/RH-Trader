@@ -3,8 +3,8 @@
 A Discord bot built with `discord.py` that tracks trading inventories, offers, requests, trades, and wishlists with emoji-rich embeds.
 
 ## Features
-- Slash commands for stock, offers, requests, search, contact, profile, trades, leaderboards, and wishlists.
-- Slash command autocomplete for stock and wishlist additions powered by the ARDB catalog.
+- Slash commands for managing stock, wishlists, search, profiles, trades, and leaderboards.
+- Modal-driven trade menu that bundles common actions with Discord Components.
 - SQLite persistence via `aiosqlite` to store user inventories, ratings, and wishlists.
 - Permission-aware profile/stock viewing when targeting other users.
 - Emoji-enhanced embeds for friendly UX and clear feedback.
@@ -22,31 +22,26 @@ A Discord bot built with `discord.py` that tracks trading inventories, offers, r
      - `DISCORD_TOKEN`: Bot token from the Discord Developer Portal.
    - Optional:
      - `TRADER_DB_PATH`: Path to the SQLite database file (default: `data/trader.db`).
-     - `CATALOG_BASE_URL`: Override the ARDB catalog host used for autocomplete (default: `https://ardb.app`).
 3. **Run the bot**
    ```bash
    python bot.py
    ```
 
 ## Commands
+- `/trademenu` — open the trading control panel with buttons and modals
 - `/stock add <item> [quantity]`
 - `/stock view [user]`
-- `/stock remove <item>`
+- `/stock remove` (modal-driven)
 - `/stock clear`
-- `/offer <item> [quantity] [details]`
-- `/offers [limit]`
-- `/request <item> [quantity] [details]`
-- `/requests [limit]`
 - `/search <term>`
-- `/contact <contact>`
 - `/profile [user]`
-- `/trade add <partner> <item>`
-- `/trade rate <user> <score 1-5>`
-- `/trade complete <trade_id> <partner> <item>`
+- `/trade start <partner> <item> <role>`
 - `/leaderboard`
 - `/wishlist add <item> [note]`
 - `/wishlist view [user]`
-- `/wishlist remove <item>`
+- `/wishlist remove` (modal-driven)
+- `/set_trade_channel <channel>`
+- `/tradepost [image]`
 
 Profiles, stock, and wishlist viewing accepts an optional `user` argument; targeting others requires users with manage guild/message permissions.
 
