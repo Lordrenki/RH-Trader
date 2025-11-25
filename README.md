@@ -4,6 +4,7 @@ A Discord bot built with `discord.py` that tracks trading inventories, offers, r
 
 ## Features
 - Slash commands for stock, offers, requests, search, contact, profile, trades, leaderboards, and wishlists.
+- Slash command autocomplete for stock and wishlist additions powered by the ARDB catalog.
 - SQLite persistence via `aiosqlite` to store user inventories, ratings, and wishlists.
 - Permission-aware profile/stock viewing when targeting other users.
 - Emoji-enhanced embeds for friendly UX and clear feedback.
@@ -21,6 +22,7 @@ A Discord bot built with `discord.py` that tracks trading inventories, offers, r
      - `DISCORD_TOKEN`: Bot token from the Discord Developer Portal.
    - Optional:
      - `TRADER_DB_PATH`: Path to the SQLite database file (default: `data/trader.db`).
+     - `CATALOG_BASE_URL`: Override the ARDB catalog host used for autocomplete (default: `https://ardb.app`).
 3. **Run the bot**
    ```bash
    python bot.py

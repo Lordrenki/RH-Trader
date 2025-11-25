@@ -8,6 +8,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from .catalog import CatalogClient
 from .config import Settings, load_settings
 from .database import Database
 from .embeds import format_stock, format_wishlist, info_embed, rating_summary
@@ -23,21 +24,32 @@ def _can_view_other(interaction: discord.Interaction, target: discord.User | dis
 class TraderBot(commands.Bot):
     """Discord bot that exposes trading slash commands."""
 
-    def __init__(self, settings: Settings, db: Database) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        db: Database,
+        *,
+        catalog: CatalogClient | None = None,
+    ) -> None:
         intents = discord.Intents.default()
         intents.members = True
         super().__init__(command_prefix=commands.when_mentioned_or("!"), intents=intents)
         self.settings = settings
         self.db = db
+        self.catalog = catalog or CatalogClient(settings.catalog_base_url)
 
     async def setup_hook(self) -> None:
         await self.db.setup()
-        self.tree.add_command(StockGroup(self.db))
+        self.tree.add_command(StockGroup(self.db, self.catalog))
         self.tree.add_command(TradeGroup(self.db))
-        self.tree.add_command(WishlistGroup(self.db))
+        self.tree.add_command(WishlistGroup(self.db, self.catalog))
         await self.add_misc_commands()
         await self.tree.sync()
         _log.info("Slash commands synced")
+
+    async def close(self) -> None:
+        await self.catalog.close()
+        await super().close()
 
     async def add_misc_commands(self) -> None:
         db = self.db
@@ -282,9 +294,10 @@ class TraderBot(commands.Bot):
 
 
 class StockGroup(app_commands.Group):
-    def __init__(self, db: Database):
+    def __init__(self, db: Database, catalog: CatalogClient):
         super().__init__(name="stock", description="Manage your stock list")
         self.db = db
+        self.catalog = catalog
 
     @app_commands.command(name="add", description="Add an item to your stock list")
     @app_commands.describe(item="Item name", quantity="How many you have")
@@ -293,6 +306,17 @@ class StockGroup(app_commands.Group):
         await self.db.add_stock(interaction.user.id, item, qty)
         embed = info_embed("📦 Stock updated", f"Added **{item}** x{qty} to your inventory.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @add.autocomplete("item")
+    async def add_item_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> List[app_commands.Choice[str]]:
+        suggestions = await self.catalog.search_items(current, limit=25)
+        choices: List[app_commands.Choice[str]] = []
+        for name in suggestions[:25]:
+            trimmed = name[:100]
+            choices.append(app_commands.Choice(name=trimmed, value=trimmed))
+        return choices
 
     @app_commands.command(name="view", description="View stock for you or another member")
     @app_commands.describe(user="Member to view")
@@ -347,9 +371,10 @@ class TradeGroup(app_commands.Group):
 
 
 class WishlistGroup(app_commands.Group):
-    def __init__(self, db: Database):
+    def __init__(self, db: Database, catalog: CatalogClient):
         super().__init__(name="wishlist", description="Track items you want")
         self.db = db
+        self.catalog = catalog
 
     @app_commands.command(name="add", description="Add an item to your wishlist")
     @app_commands.describe(item="Item to add", note="Optional note like target price")
@@ -357,6 +382,17 @@ class WishlistGroup(app_commands.Group):
         await self.db.add_wishlist(interaction.user.id, item, note)
         embed = info_embed("🎯 Wishlist updated", f"Added **{item}** to your wishlist.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @add.autocomplete("item")
+    async def add_item_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> List[app_commands.Choice[str]]:
+        suggestions = await self.catalog.search_items(current, limit=25)
+        choices: List[app_commands.Choice[str]] = []
+        for name in suggestions[:25]:
+            trimmed = name[:100]
+            choices.append(app_commands.Choice(name=trimmed, value=trimmed))
+        return choices
 
     @app_commands.command(name="view", description="View wishlist for you or another member")
     @app_commands.describe(user="Member to view")
