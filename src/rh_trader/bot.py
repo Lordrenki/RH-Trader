@@ -343,8 +343,45 @@ class StockGroup(app_commands.Group):
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="remove", description="Remove an item from your stock list")
-    async def remove(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(RemoveStockModal(self.db))
+    @app_commands.describe(item="Item to remove (fuzzy matched against your stock)")
+    async def remove(self, interaction: discord.Interaction, item: str):
+        stock = await self.db.get_stock(interaction.user.id)
+        if not stock:
+            await interaction.response.send_message(
+                embed=info_embed("No stock found", "Add something first to remove it."),
+                ephemeral=True,
+            )
+            return
+
+        term = item.strip()
+        if not term:
+            await interaction.response.send_message(
+                embed=info_embed("⚠️ Item required", "Please enter an item name."),
+                ephemeral=True,
+            )
+            return
+
+        candidates = [name for name, _ in stock]
+        match = process.extractOne(term, candidates, scorer=fuzz.WRatio)
+        if not match or match[1] < 60:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "🔍 No close match",
+                    "I couldn't find anything that looks like that in your stock.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        best_name = match[0]
+        removed = await self.db.remove_stock(interaction.user.id, best_name)
+        message = (
+            f"Removed **{best_name}** from your stock." if removed else "Item not found anymore."
+        )
+        await interaction.response.send_message(
+            embed=info_embed("🧹 Stock cleanup", message),
+            ephemeral=True,
+        )
 
     @app_commands.command(name="clear", description="Clear all items from your stock list")
     async def clear(self, interaction: discord.Interaction):
@@ -403,8 +440,45 @@ class WishlistGroup(app_commands.Group):
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="remove", description="Remove an item from your wishlist")
-    async def remove(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(RemoveWishlistModal(self.db))
+    @app_commands.describe(item="Item to remove (fuzzy matched against your wishlist)")
+    async def remove(self, interaction: discord.Interaction, item: str):
+        wishlist = await self.db.get_wishlist(interaction.user.id)
+        if not wishlist:
+            await interaction.response.send_message(
+                embed=info_embed("No wishlist items", "Add items before removing them."),
+                ephemeral=True,
+            )
+            return
+
+        term = item.strip()
+        if not term:
+            await interaction.response.send_message(
+                embed=info_embed("⚠️ Item required", "Please enter an item name."),
+                ephemeral=True,
+            )
+            return
+
+        candidates = [name for name, _ in wishlist]
+        match = process.extractOne(term, candidates, scorer=fuzz.WRatio)
+        if not match or match[1] < 60:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "🔍 No close match",
+                    "I couldn't find anything that looks like that on your wishlist.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        best_name = match[0]
+        removed = await self.db.remove_wishlist(interaction.user.id, best_name)
+        message = (
+            f"Removed **{best_name}** from your wishlist." if removed else "Item not found anymore."
+        )
+        await interaction.response.send_message(
+            embed=info_embed("🧹 Wishlist cleanup", message),
+            ephemeral=True,
+        )
 
 
 class ConfirmClearView(discord.ui.View):
