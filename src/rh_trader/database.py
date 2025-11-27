@@ -203,6 +203,8 @@ class Database:
             return await cursor.fetchall()
 
     async def search_stock(self, term: str) -> List[Tuple[int, str, int]]:
+        """Search community inventories for fuzzy matches on item names."""
+
         term = term.strip()
         if not term:
             return []
@@ -221,6 +223,28 @@ class Database:
 
         scored.sort(key=lambda entry: (-entry[0], entry[2].lower(), entry[1]))
         return [(user_id, item, quantity) for _, user_id, item, quantity in scored[:20]]
+
+    async def search_wishlist(self, term: str) -> List[Tuple[int, str, str]]:
+        """Search wishlist entries for fuzzy matches on item names."""
+
+        term = term.strip()
+        if not term:
+            return []
+
+        normalized_term = self._normalize_text(term)
+        async with self._connect() as db:
+            cursor = await db.execute("SELECT user_id, item, note FROM wishlist")
+            rows = await cursor.fetchall()
+
+        scored = []
+        for row in rows:
+            user_id, item, note = row
+            score = fuzz.WRatio(normalized_term, self._normalize_text(item))
+            if score >= 60:
+                scored.append((score, user_id, item, note))
+
+        scored.sort(key=lambda entry: (-entry[0], entry[2].lower(), entry[1]))
+        return [(user_id, item, note) for _, user_id, item, note in scored[:20]]
 
     @staticmethod
     def _normalize_text(value: str) -> str:
