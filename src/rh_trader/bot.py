@@ -54,13 +54,32 @@ class TraderBot(commands.Bot):
 
     async def add_misc_commands(self) -> None:
         db = self.db
-        @self.tree.command(description="Search community inventories for an item")
-        @app_commands.describe(term="Keyword to search for")
-        async def search(interaction: discord.Interaction, term: str):
-            results = await db.search_stock(term)
-            description = "\n".join(
-                f"🔍 <@{user_id}> has **{item}** (x{qty})" for user_id, item, qty in results
-            ) or "No matching items found."
+        @self.tree.command(description="Search community inventories or wishlists for an item")
+        @app_commands.describe(
+            term="Keyword to search for",
+            target="Choose whether to search inventory or wishlist entries",
+        )
+        @app_commands.choices(
+            target=[
+                app_commands.Choice(name="Stock", value="stock"),
+                app_commands.Choice(name="Wishlist", value="wishlist"),
+            ]
+        )
+        async def search(
+            interaction: discord.Interaction, term: str, target: app_commands.Choice[str]
+        ):
+            if target.value == "wishlist":
+                results = await db.search_wishlist(term)
+                description = "\n".join(
+                    f"🔍 <@{user_id}> wants **{item}**" + (f" — {note}" if note else "")
+                    for user_id, item, note in results
+                ) or "No matching wishlist items found."
+            else:
+                results = await db.search_stock(term)
+                description = "\n".join(
+                    f"🔍 <@{user_id}> has **{item}** (x{qty})" for user_id, item, qty in results
+                ) or "No matching stock items found."
+
             embed = info_embed("🔎 Search results", description)
             await interaction.response.send_message(embed=embed)
 
