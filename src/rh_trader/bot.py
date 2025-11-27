@@ -56,26 +56,26 @@ class TraderBot(commands.Bot):
         db = self.db
         @self.tree.command(description="Search community inventories or wishlists for an item")
         @app_commands.describe(
-            term="Keyword to search for",
-            target="Choose whether to search inventory or wishlist entries",
+            item="Keyword to search for",
+            location="Choose whether to search inventory or wishlist entries",
         )
         @app_commands.choices(
-            target=[
+            location=[
                 app_commands.Choice(name="Stock", value="stock"),
                 app_commands.Choice(name="Wishlist", value="wishlist"),
             ]
         )
         async def search(
-            interaction: discord.Interaction, term: str, target: app_commands.Choice[str]
+            interaction: discord.Interaction, item: str, location: app_commands.Choice[str]
         ):
-            if target.value == "wishlist":
-                results = await db.search_wishlist(term)
+            if location.value == "wishlist":
+                results = await db.search_wishlist(item)
                 description = "\n".join(
                     f"🔍 <@{user_id}> wants **{item}**" + (f" — {note}" if note else "")
                     for user_id, item, note in results
                 ) or "No matching wishlist items found."
             else:
-                results = await db.search_stock(term)
+                results = await db.search_stock(item)
                 description = "\n".join(
                     f"🔍 <@{user_id}> has **{item}** (x{qty})" for user_id, item, qty in results
                 ) or "No matching stock items found."

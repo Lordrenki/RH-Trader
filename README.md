@@ -33,7 +33,7 @@ A Discord bot built with `discord.py` that tracks trading inventories, offers, r
 - `/stock view [user]`
 - `/stock remove` (modal-driven)
 - `/stock clear`
-- `/search <term>`
+- `/search <item>`
 - `/profile [user]`
 - `/trade start <partner> <item> <role>`
 - `/leaderboard`
