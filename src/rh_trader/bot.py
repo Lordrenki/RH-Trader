@@ -347,6 +347,57 @@ class StockGroup(app_commands.Group):
         embed = info_embed("📦 Stock updated", f"Added **{item}** x{qty} to your inventory.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    @app_commands.command(
+        name="change", description="Change the quantity for an item in your stock list"
+    )
+    @app_commands.describe(
+        item="Item to update (fuzzy matched against your stock)",
+        quantity="New quantity you have",
+    )
+    async def change(self, interaction: discord.Interaction, item: str, quantity: int):
+        stock = await self.db.get_stock(interaction.user.id)
+        if not stock:
+            await interaction.response.send_message(
+                embed=info_embed("No stock found", "Add something first to change it."),
+                ephemeral=True,
+            )
+            return
+
+        term = item.strip()
+        if not term:
+            await interaction.response.send_message(
+                embed=info_embed("⚠️ Item required", "Please enter an item name."),
+                ephemeral=True,
+            )
+            return
+
+        names = [name for name, _ in stock]
+        match = process.extractOne(term, names, scorer=fuzz.WRatio)
+        if not match or match[1] < 60:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "🔍 No close match",
+                    "I couldn't find anything that looks like that in your stock.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        best_name = match[0]
+        current_qty = next(qty for name, qty in stock if name == best_name)
+        new_qty = max(0, quantity)
+        await self.db.update_stock_quantity(interaction.user.id, best_name, new_qty)
+
+        if new_qty == 0:
+            message = f"Removed **{best_name}** from your stock."
+        else:
+            message = f"Updated **{best_name}** to x{new_qty} (was x{current_qty})."
+
+        await interaction.response.send_message(
+            embed=info_embed("📦 Stock updated", message),
+            ephemeral=True,
+        )
+
     @app_commands.command(name="view", description="View stock for you or another member")
     @app_commands.describe(user="Member to view")
     async def view(self, interaction: discord.Interaction, user: Optional[discord.User] = None):
