@@ -158,6 +158,29 @@ class Database:
                 await db.execute("DELETE FROM inventories WHERE user_id = ?", (user_id,))
                 await db.commit()
 
+    async def update_stock_quantity(self, user_id: int, item: str, quantity: int) -> bool:
+        """Set the quantity for a stock item, removing it when the count hits zero."""
+
+        await self.ensure_user(user_id)
+        item = item.strip()
+        async with self._lock:
+            async with self._connect() as db:
+                if quantity <= 0:
+                    cursor = await db.execute(
+                        "DELETE FROM inventories WHERE user_id = ? AND item = ?",
+                        (user_id, item),
+                    )
+                    await db.commit()
+                    return cursor.rowcount > 0
+
+                await db.execute(
+                    "INSERT INTO inventories(user_id, item, quantity) VALUES (?, ?, ?)\n"
+                    "ON CONFLICT(user_id, item) DO UPDATE SET quantity = excluded.quantity",
+                    (user_id, item, quantity),
+                )
+                await db.commit()
+                return True
+
     async def get_stock(self, user_id: int) -> List[Tuple[str, int]]:
         async with self._connect() as db:
             cursor = await db.execute(

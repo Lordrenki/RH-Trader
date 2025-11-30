@@ -24,10 +24,20 @@ async def test_stock_crud(tmp_path: Path):
     assert ("Gadget", 3) in items
     assert ("Widget", 3) in items
 
+    updated = await db.update_stock_quantity(1, "Widget", 5)
+    assert updated
+    items = dict(await db.get_stock(1))
+    assert items["Widget"] == 5
+
+    removed_via_update = await db.update_stock_quantity(1, "Gadget", 0)
+    assert removed_via_update
+    items = await db.get_stock(1)
+    assert all(item != "Gadget" for item, _ in items)
+
     removed = await db.remove_stock(1, "Widget")
     assert removed
     items = await db.get_stock(1)
-    assert ("Widget", 3) not in items
+    assert all(item != "Widget" for item, _ in items)
 
     await db.clear_stock(1)
     assert await db.get_stock(1) == []
