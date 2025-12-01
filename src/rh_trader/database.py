@@ -77,6 +77,16 @@ class Database:
                     PRIMARY KEY (trade_id, rater_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS quick_ratings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    rater_id INTEGER NOT NULL,
+                    target_id INTEGER NOT NULL,
+                    score INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_quick_ratings_pair_time
+                    ON quick_ratings(rater_id, target_id, created_at DESC);
+
                 CREATE TABLE IF NOT EXISTS guild_settings (
                     guild_id INTEGER PRIMARY KEY,
                     trade_channel_id INTEGER
@@ -311,6 +321,53 @@ class Database:
                     (rating, user_id),
                 )
                 await db.commit()
+
+    async def record_quick_rating(
+        self,
+        rater_id: int,
+        target_id: int,
+        score: int,
+        cooldown_seconds: int,
+        *,
+        now: int | None = None,
+    ) -> tuple[bool, int | None]:
+        """Record a star rating outside of trades with per-user cooldowns.
+
+        Returns a tuple of (recorded, retry_after_seconds). When the rating is rejected
+        because of cooldown, ``recorded`` is False and ``retry_after_seconds`` contains
+        the time remaining until another rating is allowed.
+        """
+
+        if score < 1 or score > 5:
+            raise ValueError("Score must be between 1 and 5")
+        await self.ensure_user(rater_id)
+        await self.ensure_user(target_id)
+
+        timestamp = int(now or asyncio.get_event_loop().time())
+        async with self._lock:
+            async with self._connect() as db:
+                cursor = await db.execute(
+                    "SELECT created_at FROM quick_ratings WHERE rater_id = ? AND target_id = ?\n"
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (rater_id, target_id),
+                )
+                row = await cursor.fetchone()
+                if row:
+                    elapsed = timestamp - row[0]
+                    if elapsed < cooldown_seconds:
+                        return False, cooldown_seconds - elapsed
+
+                await db.execute(
+                    "INSERT INTO quick_ratings(rater_id, target_id, score, created_at) VALUES (?, ?, ?, ?)",
+                    (rater_id, target_id, score, timestamp),
+                )
+                await db.execute(
+                    "UPDATE users SET rating_total = rating_total + ?, rating_count = rating_count + 1\n"
+                    "WHERE user_id = ?",
+                    (score, target_id),
+                )
+                await db.commit()
+        return True, None
 
     async def create_trade(self, seller_id: int, buyer_id: int, item: str) -> int:
         await self.ensure_user(seller_id)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from typing import Awaitable, Callable, List, Optional, Tuple
 
 import discord
@@ -15,6 +16,22 @@ from .database import Database
 from .embeds import format_stock, format_wishlist, info_embed, rating_summary
 
 _log = logging.getLogger(__name__)
+QUICK_RATING_COOLDOWN_SECONDS = 24 * 60 * 60
+
+
+def _format_duration(seconds: int) -> str:
+    delta = timedelta(seconds=seconds)
+    days = delta.days
+    hours, remainder = divmod(delta.seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+
+    if days:
+        return f"{days} day(s)"
+    if hours:
+        return f"{hours} hour(s)"
+    if minutes:
+        return f"{minutes} minute(s)"
+    return f"{secs} second(s)"
 
 
 def _can_view_other(interaction: discord.Interaction, target: discord.User | discord.Member) -> bool:
@@ -464,6 +481,56 @@ class TradeGroup(app_commands.Group):
     def __init__(self, db: Database):
         super().__init__(name="trade", description="Manage trades and ratings")
         self.db = db
+
+    @app_commands.command(
+        name="kudos", description="Give someone a quick star rating outside a trade"
+    )
+    @app_commands.describe(
+        partner="Member you want to rate", score="Number of stars to award (1-5)"
+    )
+    async def kudos(
+        self,
+        interaction: discord.Interaction,
+        partner: discord.Member,
+        score: app_commands.Range[int, 1, 5],
+    ):
+        if partner.id == interaction.user.id:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "🚫 Invalid target", "You cannot give kudos to yourself."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        recorded, retry_after = await self.db.record_quick_rating(
+            interaction.user.id,
+            partner.id,
+            score,
+            QUICK_RATING_COOLDOWN_SECONDS,
+        )
+        if not recorded:
+            wait_label = _format_duration(int(retry_after or 0))
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "⏳ On cooldown",
+                    f"You recently rated {partner.mention}. You can send another kudos in {wait_label}.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        _, avg_score, rating_count = await self.db.profile(partner.id)
+        await interaction.response.send_message(
+            embed=info_embed(
+                "⭐ Kudos sent",
+                (
+                    f"You rated {partner.mention} {score} star(s).\n"
+                    f"Their profile now shows: {rating_summary(avg_score, rating_count)}"
+                ),
+            ),
+            ephemeral=True,
+        )
 
     @app_commands.command(name="start", description="Open a trade and move the conversation to DMs")
     @app_commands.describe(partner="Partner involved in the trade", item="Item or service being traded", role="Are you the seller or buyer?")

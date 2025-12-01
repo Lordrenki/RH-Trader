@@ -1,4 +1,3 @@
-import asyncio
 from pathlib import Path
 
 import pytest
@@ -67,6 +66,29 @@ async def test_ratings_and_leaderboard(tmp_path: Path):
     contact, score, count = await db.profile(1)
     assert score == pytest.approx(4.0)
     assert count == 2
+
+
+async def test_quick_rating_cooldown(tmp_path: Path):
+    db = await init_db(tmp_path)
+
+    recorded, retry_after = await db.record_quick_rating(10, 20, 5, 60, now=1_000)
+    assert recorded is True
+    assert retry_after is None
+
+    # Second attempt before cooldown should be rejected
+    recorded, retry_after = await db.record_quick_rating(10, 20, 4, 60, now=1_030)
+    assert recorded is False
+    assert retry_after == 30
+
+    # Different target should not be blocked by cooldown
+    recorded, retry_after = await db.record_quick_rating(10, 21, 3, 60, now=1_030)
+    assert recorded is True
+    assert retry_after is None
+
+    # Cooldown expired for original target
+    recorded, retry_after = await db.record_quick_rating(10, 20, 4, 60, now=1_070)
+    assert recorded is True
+    assert retry_after is None
 
 
 async def test_offers_and_requests(tmp_path: Path):
