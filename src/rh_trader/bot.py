@@ -85,20 +85,47 @@ class TraderBot(commands.Bot):
         async def search(
             interaction: discord.Interaction, item: str, location: app_commands.Choice[str]
         ):
+            async def _filter_guild_members(entries: list[tuple[int, ...]]):
+                guild = interaction.guild
+                if guild is None:
+                    return entries
+
+                filtered: list[tuple[int, ...]] = []
+                for entry in entries:
+                    user_id = entry[0]
+                    member = guild.get_member(user_id)
+                    if member is None:
+                        try:
+                            member = await guild.fetch_member(user_id)
+                        except discord.HTTPException:
+                            member = None
+
+                    if member is not None:
+                        filtered.append(entry)
+
+                return filtered
+
             if location.value == "wishlist":
                 results = await db.search_wishlist(item)
+                results = await _filter_guild_members(results)
                 description = "\n".join(
                     f"🔍 <@{user_id}> wants **{item}**" + (f" — {note}" if note else "")
                     for user_id, item, note in results
-                ) or "No matching wishlist items found."
+                ) or "No matching wishlist items found from members of this server."
             else:
                 results = await db.search_stock(item)
+                results = await _filter_guild_members(results)
                 description = "\n".join(
                     f"🔍 <@{user_id}> has **{item}** (x{qty})" for user_id, item, qty in results
-                ) or "No matching stock items found."
+                ) or "No matching stock items found from members of this server."
 
             embed = info_embed("🔎 Search results", description)
-            await interaction.response.send_message(embed=embed)
+            await interaction.response.send_message(
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions(
+                    users=True, roles=False, everyone=False, replied_user=False
+                ),
+            )
 
         @self.tree.command(description="Open a quick trading control panel")
         async def trademenu(interaction: discord.Interaction):
