@@ -62,8 +62,43 @@ class TraderBot(commands.Bot):
         self.tree.add_command(TradeGroup(self.db))
         self.tree.add_command(WishlistGroup(self.db))
         await self.add_misc_commands()
+        await self.register_persistent_views()
         await self.tree.sync()
         _log.info("Slash commands synced")
+
+    async def register_persistent_views(self) -> None:
+        for _, user_id, _, _ in await self.db.list_trade_posts():
+            self.add_view(TradePostView(self.db, user_id))
+
+        for trade_id, seller_id, buyer_id, item, status in await self.db.list_trades_by_status(
+            {"pending", "open"}
+        ):
+            self.add_view(
+                TradeView(
+                    self.db, trade_id, seller_id, buyer_id, item, is_seller=True, status=status
+                )
+            )
+            self.add_view(
+                TradeView(
+                    self.db,
+                    trade_id,
+                    seller_id,
+                    buyer_id,
+                    item,
+                    is_seller=False,
+                    status=status,
+                )
+            )
+
+        for trade_id, seller_id, buyer_id, item, _ in await self.db.list_trades_by_status(
+            {"completed"}
+        ):
+            self.add_view(
+                RatingView(self.db, trade_id, seller_id, buyer_id, "seller", item)
+            )
+            self.add_view(
+                RatingView(self.db, trade_id, buyer_id, seller_id, "buyer", item)
+            )
 
     async def close(self) -> None:
         await self.catalog.close()
@@ -1114,11 +1149,12 @@ class TradeRequestModal(discord.ui.Modal):
 
 
 class TradePostView(BasePersistentView):
-    def __init__(self, db: Database, poster_id: int, poster_name: str):
+    def __init__(self, db: Database, poster_id: int, poster_name: str | None = None):
         super().__init__()
         self.db = db
         self.poster_id = poster_id
-        self.poster_name = poster_name
+        self.poster_name = poster_name or ""
+        self.start_trade.custom_id = f"tradepost:start:{poster_id}"
 
     @discord.ui.button(label="Start Trade", style=discord.ButtonStyle.primary, emoji="🤝")
     async def start_trade(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -1166,6 +1202,13 @@ class TradeView(BasePersistentView):
         self.item = item
         self.is_seller = is_seller
         self.status = status
+        role_label = "seller" if is_seller else "buyer"
+        base_custom_id = f"trade:{trade_id}:{role_label}"
+        self.set_active_button.custom_id = f"{base_custom_id}:active"
+        self.complete_button.custom_id = f"{base_custom_id}:complete"
+        self.cancel_button.custom_id = f"{base_custom_id}:cancel"
+        self.accept_button.custom_id = f"{base_custom_id}:accept"
+        self.reject_button.custom_id = f"{base_custom_id}:reject"
         self._configure_buttons()
 
     def _configure_buttons(self) -> None:
@@ -1466,6 +1509,12 @@ class RatingView(BasePersistentView):
         self.partner_id = partner_id
         self.role = role
         self.item = item
+        prefix = f"rating:{trade_id}:{rater_id}:{partner_id}:{role}"
+        self.rate_one.custom_id = f"{prefix}:1"
+        self.rate_two.custom_id = f"{prefix}:2"
+        self.rate_three.custom_id = f"{prefix}:3"
+        self.rate_four.custom_id = f"{prefix}:4"
+        self.rate_five.custom_id = f"{prefix}:5"
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.rater_id:

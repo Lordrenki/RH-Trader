@@ -505,6 +505,21 @@ class Database:
             )
             return await cursor.fetchone()
 
+    async def list_trades_by_status(
+        self, statuses: Iterable[str]
+    ) -> List[Tuple[int, int, int, str, str]]:
+        if not statuses:
+            return []
+
+        placeholders = ",".join("?" for _ in statuses)
+        query = (
+            "SELECT id, seller_id, buyer_id, item, status FROM trades\n"
+            f"WHERE status IN ({placeholders})"
+        )
+        async with self._connect() as db:
+            cursor = await db.execute(query, tuple(statuses))
+            return await cursor.fetchall()
+
     async def list_open_trades_for_user(
         self, user_id: int
     ) -> List[Tuple[int, int, int, str, str]]:
@@ -598,6 +613,13 @@ class Database:
             async with self._connect() as db:
                 await db.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
                 await db.commit()
+
+    async def list_trade_posts(self) -> List[Tuple[int, int, int, int]]:
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "SELECT guild_id, user_id, channel_id, message_id FROM trade_posts"
+            )
+            return await cursor.fetchall()
 
     async def get_trade_post(self, guild_id: int, user_id: int) -> Tuple[int, int] | None:
         async with self._connect() as db:
