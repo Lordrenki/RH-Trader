@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Awaitable, Callable, List, Optional, Tuple
 
@@ -20,10 +21,35 @@ _log = logging.getLogger(__name__)
 QUICK_RATING_COOLDOWN_SECONDS = 24 * 60 * 60
 STORE_POST_WINDOW_SECONDS = 60 * 60
 DEFAULT_STORE_POST_LIMIT = 1
-PREMIUM_STORE_POST_LIMIT = 3
-PREMIUM_STORE_SKU_ID = 1_447_683_957_981_319_169
 DEFAULT_STORE_LISTING_LIMIT = 10
-PREMIUM_STORE_LISTING_LIMIT = 25
+
+
+@dataclass(frozen=True)
+class StoreTierBenefits:
+    """Benefit limits for a specific premium tier."""
+
+    name: str
+    rank: int
+    post_limit: int
+    listing_limit: int
+
+
+#: Mapping of premium SKU IDs to tier benefits. Tiers scale from Premium
+#: Trader (Tier 1) through Elite Trader (Tier 2) and Expert Trader (Tier 3).
+STORE_TIER_BY_SKU: dict[int, StoreTierBenefits] = {
+    1_447_683_957_981_319_169: StoreTierBenefits(
+        "Premium Trader", rank=1, post_limit=3, listing_limit=25
+    ),
+    1_447_725_003_956_293_724: StoreTierBenefits(
+        "Elite Trader", rank=2, post_limit=4, listing_limit=35
+    ),
+    1_447_725_110_529_102_005: StoreTierBenefits(
+        "Expert Trader", rank=3, post_limit=5, listing_limit=50
+    ),
+}
+
+#: Consumable SKU that enables a single global store post across all servers.
+GLOBAL_STORE_POST_SKU = 1_447_725_322_802_823_299
 
 
 def _format_duration(seconds: int) -> str:
@@ -248,19 +274,26 @@ class TraderBot(commands.Bot):
         ):
             await self._handle_store_post(interaction, image)
 
-    def _has_store_premium(self, interaction: discord.Interaction) -> bool:
+    def _has_store_premium(
+        self, interaction: discord.Interaction
+    ) -> StoreTierBenefits | None:
         entitlements = getattr(interaction, "entitlements", None) or []
         now = discord.utils.utcnow()
+        best_tier: StoreTierBenefits | None = None
 
         for entitlement in entitlements:
-            if getattr(entitlement, "sku_id", None) != PREMIUM_STORE_SKU_ID:
+            tier = STORE_TIER_BY_SKU.get(getattr(entitlement, "sku_id", None))
+            if tier is None:
                 continue
 
             ends_at = getattr(entitlement, "ends_at", None)
-            if ends_at is None or ends_at > now:
-                return True
+            if ends_at is not None and ends_at <= now:
+                continue
 
-        return False
+            if best_tier is None or tier.rank > best_tier.rank:
+                best_tier = tier
+
+        return best_tier
 
     async def _handle_store_post(
         self, interaction: discord.Interaction, image: Optional[discord.Attachment]
@@ -317,13 +350,11 @@ class TraderBot(commands.Bot):
 
         now_ts = int(time.time())
         window_start = now_ts - STORE_POST_WINDOW_SECONDS
-        has_premium = self._has_store_premium(interaction)
+        store_tier = self._has_store_premium(interaction)
         recent_posts, oldest_post = await db.store_post_window(
             interaction.guild.id, interaction.user.id, window_start
         )
-        post_limit = (
-            PREMIUM_STORE_POST_LIMIT if has_premium else DEFAULT_STORE_POST_LIMIT
-        )
+        post_limit = store_tier.post_limit if store_tier else DEFAULT_STORE_POST_LIMIT
         if recent_posts >= post_limit:
             retry_after = STORE_POST_WINDOW_SECONDS
             if oldest_post:
@@ -345,9 +376,7 @@ class TraderBot(commands.Bot):
         wishlist = await db.get_wishlist(interaction.user.id)
 
         listing_limit = (
-            PREMIUM_STORE_LISTING_LIMIT
-            if has_premium
-            else DEFAULT_STORE_LISTING_LIMIT
+            store_tier.listing_limit if store_tier else DEFAULT_STORE_LISTING_LIMIT
         )
         stock_display = stock[:listing_limit]
         wishlist_display = wishlist[:listing_limit]
