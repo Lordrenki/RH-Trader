@@ -834,6 +834,57 @@ class TradeMenuView(discord.ui.View):
         self.db = db
         self._tradepost_handler = tradepost_handler
 
+        action_select = discord.ui.Select(
+            placeholder="Pick an action",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label="Stock • Add item",
+                    value="stock_add",
+                    emoji="🧺",
+                    description="Add an item to your stock list.",
+                ),
+                discord.SelectOption(
+                    label="Stock • Remove item",
+                    value="stock_remove",
+                    emoji="➖",
+                    description="Remove an item from your stock list.",
+                ),
+                discord.SelectOption(
+                    label="Stock • Clear all",
+                    value="stock_clear",
+                    emoji="🧹",
+                    description="Delete every item from your stock.",
+                ),
+                discord.SelectOption(
+                    label="Wishlist • Add item",
+                    value="wishlist_add",
+                    emoji="📌",
+                    description="Add something you want.",
+                ),
+                discord.SelectOption(
+                    label="Wishlist • Remove item",
+                    value="wishlist_remove",
+                    emoji="🗑️",
+                    description="Remove something you no longer need.",
+                ),
+                discord.SelectOption(
+                    label="Trade Post • View lists",
+                    value="view_lists",
+                    emoji="📋",
+                    description="Preview your stock and wishlist.",
+                ),
+            ],
+            row=0,
+        )
+
+        async def _on_action_select(interaction: discord.Interaction) -> None:
+            await self.on_action_select(interaction, action_select)
+
+        action_select.callback = _on_action_select
+        self.add_item(action_select)
+
     async def _send_snapshot(self, interaction: discord.Interaction) -> None:
         stock = await self.db.get_stock(interaction.user.id)
         wishlist = await self.db.get_wishlist(interaction.user.id)
@@ -845,51 +896,44 @@ class TradeMenuView(discord.ui.View):
         embed.add_field(name="Wishlist", value=format_wishlist(wishlist), inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="Add Stock", style=discord.ButtonStyle.primary, emoji="➕", row=0)
-    async def add_stock(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await interaction.response.send_modal(StockAddModal(self.db))
-
-    @discord.ui.button(label="Remove Stock", style=discord.ButtonStyle.secondary, emoji="➖", row=0)
-    async def remove_stock(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await interaction.response.send_modal(RemoveStockModal(self.db))
-
-    @discord.ui.button(label="Trade Post", style=discord.ButtonStyle.success, emoji="📢", row=0)
+    @discord.ui.button(label="Open Trade Post", style=discord.ButtonStyle.primary, emoji="📢", row=1)
     async def tradepost(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self._tradepost_handler(interaction, None)
 
-    @discord.ui.button(label="Add Wishlist", style=discord.ButtonStyle.primary, emoji="📌", row=1)
-    async def add_wishlist(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await interaction.response.send_modal(WishlistAddModal(self.db))
-
-    @discord.ui.button(label="Remove Wishlist", style=discord.ButtonStyle.secondary, emoji="📭", row=1)
-    async def remove_wishlist(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await interaction.response.send_modal(RemoveWishlistModal(self.db))
-
-    @discord.ui.button(label="Clear Stock", style=discord.ButtonStyle.danger, emoji="🗑️", row=1)
-    async def clear_stock(self, interaction: discord.Interaction, _: discord.ui.Button):
-        async def confirm(inter: discord.Interaction) -> None:
-            await self.db.clear_stock(inter.user.id)
-            await inter.response.edit_message(
-                embed=info_embed("🗑️ Stock cleared", "Your inventory list is now empty."),
-                view=None,
-            )
-
-        view = ConfirmClearView(confirm)
-        await interaction.response.send_message(
-            embed=info_embed("Confirm", "This will remove all stock entries."),
-            view=view,
-            ephemeral=True,
-        )
-
-    @discord.ui.button(label="View Lists", style=discord.ButtonStyle.success, emoji="📋", row=2)
-    async def view_lists(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self._send_snapshot(interaction)
-
-    @discord.ui.button(label="Close", style=discord.ButtonStyle.secondary, emoji="🚪", row=2)
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.primary, emoji="🚪", row=1)
     async def close(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.edit_message(
             embed=info_embed("Closed", "You can reopen /trademenu anytime."), view=None
         )
+
+    async def on_action_select(
+        self, interaction: discord.Interaction, select: discord.ui.Select
+    ) -> None:
+        selection = select.values[0]
+        if selection == "stock_add":
+            await interaction.response.send_modal(StockAddModal(self.db))
+        elif selection == "stock_remove":
+            await interaction.response.send_modal(RemoveStockModal(self.db))
+        elif selection == "stock_clear":
+            async def confirm(inter: discord.Interaction) -> None:
+                await self.db.clear_stock(inter.user.id)
+                await inter.response.edit_message(
+                    embed=info_embed("🧹 Stock cleared", "Your inventory list is now empty."),
+                    view=None,
+                )
+
+            view = ConfirmClearView(confirm)
+            await interaction.response.send_message(
+                embed=info_embed("Confirm", "This will remove all stock entries."),
+                view=view,
+                ephemeral=True,
+            )
+        elif selection == "wishlist_add":
+            await interaction.response.send_modal(WishlistAddModal(self.db))
+        elif selection == "wishlist_remove":
+            await interaction.response.send_modal(RemoveWishlistModal(self.db))
+        elif selection == "view_lists":
+            await self._send_snapshot(interaction)
 
 
 async def send_trade_invites(
