@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from typing import Iterable, List, Optional, Tuple
 
 import aiosqlite
@@ -99,6 +100,14 @@ class Database:
                     message_id INTEGER NOT NULL,
                     PRIMARY KEY (guild_id, user_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS store_post_logs (
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_store_post_logs_window
+                    ON store_post_logs(guild_id, user_id, created_at DESC);
 
                 CREATE TABLE IF NOT EXISTS active_trades (
                     user_id INTEGER PRIMARY KEY,
@@ -621,6 +630,42 @@ class Database:
             )
             return await cursor.fetchall()
 
+    async def store_post_window(
+        self, guild_id: int, user_id: int, since_timestamp: int
+    ) -> Tuple[int, Optional[int]]:
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "SELECT COUNT(*), MIN(created_at) FROM store_post_logs\n"
+                "WHERE guild_id = ? AND user_id = ? AND created_at >= ?",
+                (guild_id, user_id, since_timestamp),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                return 0, None
+            return (row[0] or 0, row[1])
+
+    async def record_store_post(
+        self, guild_id: int, user_id: int, timestamp: Optional[int] = None
+    ) -> None:
+        if timestamp is None:
+            timestamp = int(time.time())
+
+        async with self._lock:
+            async with self._connect() as db:
+                await db.execute(
+                    "INSERT INTO store_post_logs(guild_id, user_id, created_at) VALUES (?, ?, ?)",
+                    (guild_id, user_id, timestamp),
+                )
+                await db.commit()
+
+    async def trim_store_posts(self, cutoff_timestamp: int) -> None:
+        async with self._lock:
+            async with self._connect() as db:
+                await db.execute(
+                    "DELETE FROM store_post_logs WHERE created_at < ?", (cutoff_timestamp,)
+                )
+                await db.commit()
+
     async def get_trade_post(self, guild_id: int, user_id: int) -> Tuple[int, int] | None:
         async with self._connect() as db:
             cursor = await db.execute(
@@ -660,6 +705,7 @@ class Database:
                 "trades",
                 "trade_feedback",
                 "guild_settings",
+                "store_post_logs",
             ]:
                 cursor = await db.execute(f"SELECT * FROM {table}")
                 for row in await cursor.fetchall():
