@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import timedelta
 from typing import Awaitable, Callable, List, Optional, Tuple
 
@@ -17,6 +18,10 @@ from .embeds import format_stock, format_wishlist, info_embed, rating_summary
 
 _log = logging.getLogger(__name__)
 QUICK_RATING_COOLDOWN_SECONDS = 24 * 60 * 60
+STORE_POST_WINDOW_SECONDS = 60 * 60
+DEFAULT_STORE_POST_LIMIT = 1
+PREMIUM_STORE_POST_LIMIT = 3
+PREMIUM_STORE_SKU_ID = 1_447_683_957_981_319_169
 
 
 def _format_duration(seconds: int) -> str:
@@ -68,7 +73,7 @@ class TraderBot(commands.Bot):
 
     async def register_persistent_views(self) -> None:
         for _, user_id, _, _ in await self.db.list_trade_posts():
-            self.add_view(TradePostView(self.db, user_id))
+            self.add_view(StorePostView(self.db, user_id))
 
         for trade_id, seller_id, buyer_id, item, status in await self.db.list_trades_by_status(
             {"pending", "open"}
@@ -167,13 +172,13 @@ class TraderBot(commands.Bot):
             embed = info_embed(
                 "🧰 Trade menu",
                 (
-                    "Use the buttons below to update stock and wishlist entries or share a trade post"
+                    "Use the buttons below to update stock and wishlist entries or share a store post"
                     " without typing slash commands."
                 ),
             )
             await interaction.response.send_message(
                 embed=embed,
-                view=TradeMenuView(self.db, self._handle_tradepost),
+                view=TradeMenuView(self.db, self._handle_store_post),
                 ephemeral=True,
             )
 
@@ -212,9 +217,9 @@ class TraderBot(commands.Bot):
             )
             await interaction.response.send_message(embed=info_embed("🏆 Leaderboard", description))
 
-        @self.tree.command(description="Set the trade post channel for this server")
+        @self.tree.command(description="Set the store post channel for this server")
         @app_commands.checks.has_permissions(manage_guild=True)
-        @app_commands.describe(channel="Channel where /tradepost submissions will be sent")
+        @app_commands.describe(channel="Channel where /poststore submissions will be sent")
         async def set_trade_channel(
             interaction: discord.Interaction, channel: discord.TextChannel
         ):
@@ -228,27 +233,41 @@ class TraderBot(commands.Bot):
             await db.set_trade_channel(interaction.guild.id, channel.id)
             await interaction.response.send_message(
                 embed=info_embed(
-                    "✅ Trade channel saved",
-                    f"Trade posts will be sent to {channel.mention}.",
+                    "✅ Store channel saved",
+                    f"Store posts will be sent to {channel.mention}.",
                 ),
                 ephemeral=True,
             )
 
-        @self.tree.command(description="Post your stock and wishlist to the server's trade board")
+        @self.tree.command(name="poststore", description="Post your store to the server board")
         @app_commands.describe(image="Optional image to showcase your items")
-        async def tradepost(
+        async def poststore(
             interaction: discord.Interaction, image: Optional[discord.Attachment] = None
         ):
-            await self._handle_tradepost(interaction, image)
+            await self._handle_store_post(interaction, image)
 
-    async def _handle_tradepost(
+    def _has_store_premium(self, interaction: discord.Interaction) -> bool:
+        entitlements = getattr(interaction, "entitlements", None) or []
+        now = discord.utils.utcnow()
+
+        for entitlement in entitlements:
+            if getattr(entitlement, "sku_id", None) != PREMIUM_STORE_SKU_ID:
+                continue
+
+            ends_at = getattr(entitlement, "ends_at", None)
+            if ends_at is None or ends_at > now:
+                return True
+
+        return False
+
+    async def _handle_store_post(
         self, interaction: discord.Interaction, image: Optional[discord.Attachment]
     ) -> None:
         db = self.db
         if interaction.guild is None:
             await interaction.response.send_message(
                 embed=info_embed(
-                    "🌐 Guild only", "You can only post trade offers inside a server."
+                    "🌐 Guild only", "You can only post store listings inside a server."
                 ),
                 ephemeral=True,
             )
@@ -258,8 +277,8 @@ class TraderBot(commands.Bot):
         if channel_id is None:
             await interaction.response.send_message(
                 embed=info_embed(
-                    "⚙️ Trade channel not configured",
-                    "An admin needs to run /set_trade_channel to pick where trade posts go.",
+                    "⚙️ Store channel not configured",
+                    "An admin needs to run /set_trade_channel to pick where store posts go.",
                 ),
                 ephemeral=True,
             )
@@ -276,7 +295,7 @@ class TraderBot(commands.Bot):
             await interaction.response.send_message(
                 embed=info_embed(
                     "🚫 Channel unavailable",
-                    "I can't find the configured trade channel. Please ask an admin to set it again.",
+                    "I can't find the configured store channel. Please ask an admin to set it again.",
                 ),
                 ephemeral=True,
             )
@@ -287,6 +306,34 @@ class TraderBot(commands.Bot):
                 embed=info_embed(
                     "🖼️ Invalid image",
                     "The attachment must be an image file (PNG, JPG, GIF).",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        await db.trim_store_posts(int(time.time()) - STORE_POST_WINDOW_SECONDS * 2)
+
+        now_ts = int(time.time())
+        window_start = now_ts - STORE_POST_WINDOW_SECONDS
+        recent_posts, oldest_post = await db.store_post_window(
+            interaction.guild.id, interaction.user.id, window_start
+        )
+        post_limit = (
+            PREMIUM_STORE_POST_LIMIT
+            if self._has_store_premium(interaction)
+            else DEFAULT_STORE_POST_LIMIT
+        )
+        if recent_posts >= post_limit:
+            retry_after = STORE_POST_WINDOW_SECONDS
+            if oldest_post:
+                retry_after = max(0, STORE_POST_WINDOW_SECONDS - (now_ts - oldest_post))
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "⏳ Store cooldown",
+                    (
+                        f"You've reached your store post limit ({post_limit} per hour). "
+                        f"Try again in {_format_duration(int(retry_after))}."
+                    ),
                 ),
                 ephemeral=True,
             )
@@ -303,7 +350,7 @@ class TraderBot(commands.Bot):
             "Press **Start Trade** below or use `/trade start` to begin a DM with this trader."
         )
         embed = info_embed(
-            f"🛍️ Trade post from {interaction.user.display_name}",
+            f"🛒 Store post from {interaction.user.display_name}",
             "\n".join(description_lines),
         )
         embed.set_author(
@@ -314,7 +361,7 @@ class TraderBot(commands.Bot):
         if image:
             embed.set_image(url=image.url)
 
-        view = TradePostView(db, interaction.user.id, interaction.user.display_name)
+        view = StorePostView(db, interaction.user.id, interaction.user.display_name)
         previous_post = await db.get_trade_post(interaction.guild.id, interaction.user.id)
         if previous_post:
             prev_channel_id, prev_message_id = previous_post
@@ -333,7 +380,7 @@ class TraderBot(commands.Bot):
                     await db.delete_trade_post(interaction.guild.id, interaction.user.id)
                 except discord.HTTPException:
                     _log.warning(
-                        "Failed to delete previous trade post %s for user %s in guild %s",
+                        "Failed to delete previous store post %s for user %s in guild %s",
                         prev_message_id,
                         interaction.user.id,
                         interaction.guild.id,
@@ -351,10 +398,11 @@ class TraderBot(commands.Bot):
             )
             return
 
+        await db.record_store_post(interaction.guild.id, interaction.user.id, now_ts)
         await interaction.response.send_message(
             embed=info_embed(
-                "📢 Trade offer posted",
-                f"Your listing has been shared in {channel.mention}.",
+                "🏪 Store posted",
+                f"Your store has been shared in {channel.mention}.",
             ),
             ephemeral=True,
         )
@@ -856,11 +904,11 @@ class TradeMenuView(discord.ui.View):
     def __init__(
         self,
         db: Database,
-        tradepost_handler: Callable[[discord.Interaction, Optional[discord.Attachment]], Awaitable[None]],
+        store_post_handler: Callable[[discord.Interaction, Optional[discord.Attachment]], Awaitable[None]],
     ):
         super().__init__(timeout=600)
         self.db = db
-        self._tradepost_handler = tradepost_handler
+        self._store_post_handler = store_post_handler
 
         action_select = discord.ui.Select(
             placeholder="Pick an action",
@@ -898,10 +946,10 @@ class TradeMenuView(discord.ui.View):
                     description="Remove something you no longer need.",
                 ),
                 discord.SelectOption(
-                    label="Trade Post • View lists",
+                    label="Store • View lists",
                     value="view_lists",
                     emoji="📋",
-                    description="Preview your stock and wishlist.",
+                    description="Preview your stock and wishlist before posting.",
                 ),
             ],
             row=0,
@@ -924,9 +972,9 @@ class TradeMenuView(discord.ui.View):
         embed.add_field(name="Wishlist", value=format_wishlist(wishlist), inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="Open Trade Post", style=discord.ButtonStyle.primary, emoji="📢", row=1)
-    async def tradepost(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self._tradepost_handler(interaction, None)
+    @discord.ui.button(label="Post Store", style=discord.ButtonStyle.primary, emoji="🏪", row=1)
+    async def poststore(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._store_post_handler(interaction, None)
 
     @discord.ui.button(label="Close", style=discord.ButtonStyle.primary, emoji="🚪", row=1)
     async def close(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -1122,13 +1170,13 @@ class TradeRequestModal(discord.ui.Modal):
         )
 
 
-class TradePostView(BasePersistentView):
+class StorePostView(BasePersistentView):
     def __init__(self, db: Database, poster_id: int, poster_name: str | None = None):
         super().__init__()
         self.db = db
         self.poster_id = poster_id
         self.poster_name = poster_name or ""
-        self.start_trade.custom_id = f"tradepost:start:{poster_id}"
+        self.start_trade.custom_id = f"store:start:{poster_id}"
 
     @discord.ui.button(label="Start Trade", style=discord.ButtonStyle.primary, emoji="🤝")
     async def start_trade(self, interaction: discord.Interaction, _: discord.ui.Button):

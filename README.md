@@ -41,7 +41,7 @@ A Discord bot built with `discord.py` that tracks trading inventories, offers, r
 - `/wishlist view [user]`
 - `/wishlist remove` (modal-driven)
 - `/set_trade_channel <channel>`
-- `/tradepost [image]`
+- `/poststore [image]`
 
 Profiles, stock, and wishlist viewing accepts an optional `user` argument; targeting others requires users with manage guild/message permissions.
 
