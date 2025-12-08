@@ -595,21 +595,14 @@ class TradeGroup(app_commands.Group):
         )
 
     @app_commands.command(name="start", description="Open a trade and move the conversation to DMs")
-    @app_commands.describe(partner="Partner involved in the trade", item="Item or service being traded", role="Are you the seller or buyer?")
-    @app_commands.choices(
-        role=[
-            app_commands.Choice(name="Seller", value="seller"),
-            app_commands.Choice(name="Buyer", value="buyer"),
-        ]
-    )
+    @app_commands.describe(partner="Partner involved in the trade", item="Item or service being traded")
     async def start(
         self,
         interaction: discord.Interaction,
         partner: discord.Member,
         item: str,
-        role: app_commands.Choice[str],
     ):
-        await start_trade_flow(interaction, self.db, interaction.user, partner, item, role.value)
+        await start_trade_flow(interaction, self.db, interaction.user, partner, item)
 
 
 class WishlistGroup(app_commands.Group):
@@ -983,7 +976,6 @@ async def send_trade_invites(
 ) -> List[int]:
     failed_ids: List[int] = []
     for user_id in (seller_id, buyer_id):
-        role_label = "Seller" if user_id == seller_id else "Buyer"
         partner_id = buyer_id if user_id == seller_id else seller_id
         try:
             user = bot.get_user(user_id) or await bot.fetch_user(user_id)
@@ -1000,13 +992,13 @@ async def send_trade_invites(
             pending_note = (
                 "\nPress **Accept Trade** to start or **Reject Trade** to decline."
                 if is_seller and status == "pending"
-                else "\nWaiting for the seller to accept the trade."
+                else "\nWaiting for your partner to accept the trade."
             )
             await user.send(
                 embed=info_embed(
                     f"🤝 Trade #{trade_id} started",
                     (
-                        f"You are the **{role_label}** for **{item}** with <@{partner_id}>.\n"
+                        f"Trade for **{item}** with <@{partner_id}>.\n"
                         "Reply in this DM to send messages to your partner."
                         f"{pending_note}"
                         f"{stats_line}"
@@ -1034,7 +1026,6 @@ async def start_trade_flow(
     initiator: discord.abc.User,
     partner: discord.abc.User,
     item: str,
-    role_value: str,
 ) -> None:
     await interaction.response.defer(ephemeral=True)
 
@@ -1053,8 +1044,8 @@ async def start_trade_flow(
         )
         return
 
-    seller_id = initiator.id if role_value == "seller" else partner.id
-    buyer_id = partner.id if role_value == "seller" else initiator.id
+    seller_id = partner.id
+    buyer_id = initiator.id
     trade_id = await db.create_trade(seller_id, buyer_id, cleaned_item)
     failed_dm_ids = await send_trade_invites(
         interaction.client, db, trade_id, cleaned_item, seller_id, buyer_id
@@ -1096,7 +1087,7 @@ async def send_rating_prompts(
                     "⭐ Rate your partner",
                     (
                         f"Trade #{trade_id} for **{item}** is complete.\n"
-                        f"You traded with <@{partner_id}> as the {role_value}."
+                        f"You traded with <@{partner_id}>."
                     ),
                 ),
                 view=RatingView(db, trade_id, user_id, partner_id, role_value, item),
@@ -1123,28 +1114,11 @@ class TradeRequestModal(discord.ui.Modal):
         self.item_input = discord.ui.TextInput(
             label="Item you want to trade", placeholder="Ex: Halo Outfit"
         )
-        self.role_input = discord.ui.TextInput(
-            label="Your role (seller or buyer)",
-            placeholder="Type seller or buyer",
-            max_length=6,
-        )
         self.add_item(self.item_input)
-        self.add_item(self.role_input)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        role_value = self.role_input.value.lower().strip()
-        if role_value not in {"seller", "buyer"}:
-            await interaction.response.send_message(
-                embed=info_embed(
-                    "⚠️ Invalid role",
-                    "Please enter either 'seller' or 'buyer' for your role.",
-                ),
-                ephemeral=True,
-            )
-            return
-
         await start_trade_flow(
-            interaction, self.db, interaction.user, self.partner, self.item_input.value, role_value
+            interaction, self.db, interaction.user, self.partner, self.item_input.value
         )
 
 
@@ -1279,7 +1253,7 @@ class TradeView(BasePersistentView):
             await interaction.response.send_message(
                 embed=info_embed(
                     "⏳ Waiting for acceptance",
-                    "The seller must accept the trade before you can set it as active.",
+                    "Your partner must accept the trade before you can set it as active.",
                 ),
                 ephemeral=True,
             )
@@ -1313,7 +1287,7 @@ class TradeView(BasePersistentView):
             await interaction.response.send_message(
                 embed=info_embed(
                     "⏳ Waiting for acceptance",
-                    "The seller must accept the trade before completing it.",
+                    "Your partner must accept the trade before completing it.",
                 ),
                 ephemeral=True,
             )
@@ -1387,7 +1361,9 @@ class TradeView(BasePersistentView):
 
         if interaction.user.id != self.seller_id:
             await interaction.response.send_message(
-                embed=info_embed("🚫 Seller only", "Only the seller can accept this trade."),
+                embed=info_embed(
+                    "🚫 Trade partner only", "Only your trade partner can accept this trade."
+                ),
                 ephemeral=True,
             )
             return
@@ -1454,7 +1430,9 @@ class TradeView(BasePersistentView):
 
         if interaction.user.id != self.seller_id:
             await interaction.response.send_message(
-                embed=info_embed("🚫 Seller only", "Only the seller can reject this trade."),
+                embed=info_embed(
+                    "🚫 Trade partner only", "Only your trade partner can reject this trade."
+                ),
                 ephemeral=True,
             )
             return
@@ -1491,7 +1469,7 @@ class TradeView(BasePersistentView):
             await partner.send(
                 embed=info_embed(
                     f"🚫 Trade #{self.trade_id} rejected",
-                    f"The seller declined the trade for **{self.item}**.",
+                    f"Your partner declined the trade for **{self.item}**.",
                 )
             )
         except discord.HTTPException:
