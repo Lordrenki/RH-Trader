@@ -22,6 +22,8 @@ STORE_POST_WINDOW_SECONDS = 60 * 60
 DEFAULT_STORE_POST_LIMIT = 1
 PREMIUM_STORE_POST_LIMIT = 3
 PREMIUM_STORE_SKU_ID = 1_447_683_957_981_319_169
+DEFAULT_STORE_LISTING_LIMIT = 10
+PREMIUM_STORE_LISTING_LIMIT = 25
 
 
 def _format_duration(seconds: int) -> str:
@@ -315,13 +317,12 @@ class TraderBot(commands.Bot):
 
         now_ts = int(time.time())
         window_start = now_ts - STORE_POST_WINDOW_SECONDS
+        has_premium = self._has_store_premium(interaction)
         recent_posts, oldest_post = await db.store_post_window(
             interaction.guild.id, interaction.user.id, window_start
         )
         post_limit = (
-            PREMIUM_STORE_POST_LIMIT
-            if self._has_store_premium(interaction)
-            else DEFAULT_STORE_POST_LIMIT
+            PREMIUM_STORE_POST_LIMIT if has_premium else DEFAULT_STORE_POST_LIMIT
         )
         if recent_posts >= post_limit:
             retry_after = STORE_POST_WINDOW_SECONDS
@@ -343,6 +344,14 @@ class TraderBot(commands.Bot):
         stock = await db.get_stock(interaction.user.id)
         wishlist = await db.get_wishlist(interaction.user.id)
 
+        listing_limit = (
+            PREMIUM_STORE_LISTING_LIMIT
+            if has_premium
+            else DEFAULT_STORE_LISTING_LIMIT
+        )
+        stock_display = stock[:listing_limit]
+        wishlist_display = wishlist[:listing_limit]
+
         description_lines = [rating_summary(score, count)]
         if contact:
             description_lines.append(f"📞 Contact: {contact}")
@@ -356,8 +365,18 @@ class TraderBot(commands.Bot):
         embed.set_author(
             name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url
         )
-        embed.add_field(name="Inventory", value=format_stock(stock), inline=False)
-        embed.add_field(name="Wishlist", value=format_wishlist(wishlist), inline=False)
+        stock_value = format_stock(stock_display)
+        if len(stock) > listing_limit:
+            stock_value += f"\n… {len(stock) - listing_limit} more item(s) not shown."
+
+        wishlist_value = format_wishlist(wishlist_display)
+        if len(wishlist) > listing_limit:
+            wishlist_value += (
+                f"\n… {len(wishlist) - listing_limit} more wishlist item(s) not shown."
+            )
+
+        embed.add_field(name="Inventory", value=stock_value, inline=False)
+        embed.add_field(name="Wishlist", value=wishlist_value, inline=False)
         if image:
             embed.set_image(url=image.url)
 
