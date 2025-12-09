@@ -23,4 +23,4 @@ def test_format_helpers_render_text():
 def test_info_embed_sets_footer():
     embed = embeds.info_embed("Title", "Body")
     assert isinstance(embed, discord.Embed)
-    assert embed.footer.text.startswith("RH-Trader")
+    assert embed.footer.text.startswith("Scrap Market")

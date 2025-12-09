@@ -174,7 +174,7 @@ async def build_store_embeds(
             )
         if image_url:
             embed.set_image(url=image_url)
-        embed.set_footer(text="RH-Trader • Made with ♡ by Kuro")
+        embed.set_footer(text="Scrap Market • Made with ♡ by Kuro")
         embeds.append(embed)
 
     return embeds
