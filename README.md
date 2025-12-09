@@ -3,7 +3,7 @@
 A Discord bot built with `discord.py` that tracks trading inventories, offers, requests, trades, and wishlists with emoji-rich embeds.
 
 ## Features
-- Slash commands for searching, alerts, profiles, and a consolidated store workflow.
+- Slash commands for searching, profiles, and a consolidated store workflow that bundles alerts management.
 - Modal-driven trade menu that bundles stock, wishlist, and store posting actions behind buttons.
 - SQLite persistence via `aiosqlite` to store user inventories, ratings, and wishlists.
 - Permission-aware profile/stock viewing when targeting other users.
@@ -29,9 +29,8 @@ A Discord bot built with `discord.py` that tracks trading inventories, offers, r
    ```
 
 ## Commands
-- `/store` — open the all-in-one trading control panel with buttons and modals for stock, wishlist, and posting
-- `/search <item> <location>` — search member stock or wishlists for a keyword
-- `/alerts add|view|remove` — manage item alerts; limits scale with premium tier
+- `/store` — open the all-in-one trading control panel with buttons and modals for stock, wishlist, alerts, and posting
+- `/search <item> <location>` — search member stock or wishlists for a keyword (the only standalone discovery command)
 - `/profile [user]` — view a trading profile with ratings, response stats, bio, and reviews
 - `/leaderboard` — show the top-rated traders
 - `/set_trade_channel <channel>` — pick where `/store` submissions are published
