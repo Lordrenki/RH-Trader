@@ -32,6 +32,7 @@ DEFAULT_EMBED_COLOR = 0x2B2D31
 PREMIUM_EMBED_COLOR = 0xFFD700
 EMBED_FIELD_CHAR_LIMIT = 1000
 REVIEW_CHAR_LIMIT = 300
+TRADE_THREAD_CHANNEL_ID = 1_448_072_299_000_627_210
 PREMIUM_BADGE_URL = (
     "https://cdn.discordapp.com/attachments/1431560702518104175/1447739322022498364/"
     "discotools-xyz-icon.png?ex=6938b7d0&is=69376650&hm=bd0daea439bc5d7622d4b7008ba08ba8f5e44f30a79394a23dd58f5f5a07a3e6"
@@ -473,6 +474,40 @@ class TraderBot(commands.Bot):
             )
             await interaction.response.send_message(embed=info_embed("🏆 Leaderboard", description))
 
+        @self.tree.command(name="starttrade", description="Open a private thread to trade with someone")
+        @app_commands.describe(partner="Person you want to trade with", item="What you're trading")
+        async def starttrade(
+            interaction: discord.Interaction,
+            partner: discord.Member,
+            item: app_commands.Range[str, 3, 100] = "Custom trade",
+        ):
+            if interaction.guild is None:
+                await interaction.response.send_message(
+                    embed=info_embed(
+                        "🌐 Guild only",
+                        "Start trade threads inside a server so I can add everyone to it.",
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            if partner.id == interaction.user.id:
+                await interaction.response.send_message(
+                    embed=info_embed(
+                        "🚫 Invalid target", "You cannot start a trade thread with yourself."
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            await self._open_trade_thread(
+                interaction,
+                seller_id=partner.id,
+                buyer_id=interaction.user.id,
+                item=item,
+                initiator_id=interaction.user.id,
+            )
+
         @self.tree.command(description="Set the store post channel for this server")
         @app_commands.checks.has_permissions(manage_guild=True)
         @app_commands.describe(channel="Channel where /poststore submissions will be sent")
@@ -532,6 +567,105 @@ class TraderBot(commands.Bot):
         if tier.rank == 2:
             return 10
         return 20
+
+    async def _open_trade_thread(
+        self,
+        interaction: discord.Interaction,
+        *,
+        seller_id: int,
+        buyer_id: int,
+        item: str,
+        initiator_id: int,
+    ) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "🌐 Guild only",
+                    "Trade threads can only be created inside a server.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        channel = self.get_channel(TRADE_THREAD_CHANNEL_ID)
+        if channel is None:
+            try:
+                channel = await self.fetch_channel(TRADE_THREAD_CHANNEL_ID)
+            except discord.HTTPException:
+                channel = None
+
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "🚫 Thread channel missing",
+                    "I can't access the configured trade thread channel. Please double-check it.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        seller = interaction.guild.get_member(seller_id) or await interaction.guild.fetch_member(
+            seller_id
+        )
+        buyer = interaction.guild.get_member(buyer_id) or await interaction.guild.fetch_member(
+            buyer_id
+        )
+
+        thread_name = f"trade-{buyer.display_name}-with-{seller.display_name}"
+        try:
+            thread = await channel.create_thread(
+                name=thread_name[:90],
+                type=discord.ChannelType.private_thread,
+                invitable=False,
+                reason="New trade initiated",
+            )
+        except discord.HTTPException:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "❌ Could not create thread",
+                    f"I couldn't start a trade thread in {channel.mention}.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        for member in (seller, buyer):
+            try:
+                await thread.add_user(member)
+            except discord.HTTPException:
+                _log.warning("Failed to add %s to trade thread %s", member.id, thread.id)
+
+        trade_id = await self.db.create_trade(seller_id, buyer_id, item)
+        await self.db.accept_trade(trade_id, seller_id)
+
+        intro = info_embed(
+            "🤝 Trade room opened",
+            (
+                f"<@{buyer_id}> wants to trade with <@{seller_id}> for **{item}**.\n"
+                "Use this thread to chat and press **Close Trade** when you're done."
+            ),
+        )
+        view = TradeThreadView(
+            self.db,
+            trade_id=trade_id,
+            seller_id=seller_id,
+            buyer_id=buyer_id,
+            initiator_id=initiator_id,
+            item=item,
+        )
+        self.add_view(view)
+        try:
+            await thread.send(content=f"<@{seller_id}> <@{buyer_id}>", embed=intro, view=view)
+        except discord.HTTPException:
+            _log.warning("Failed to send intro message to trade thread %s", thread.id)
+
+        await interaction.response.send_message(
+            embed=info_embed(
+                "✅ Trade thread ready",
+                f"I've opened {thread.mention} for you. I'll clean it up when the trade is closed.",
+            ),
+            ephemeral=True,
+        )
 
     async def _handle_store_post(
         self, interaction: discord.Interaction, image: Optional[discord.Attachment]
@@ -1573,6 +1707,90 @@ class BasePersistentView(discord.ui.View):
             item.disabled = True
 
 
+class TradeThreadView(BasePersistentView):
+    def __init__(
+        self,
+        db: Database,
+        *,
+        trade_id: int,
+        seller_id: int,
+        buyer_id: int,
+        initiator_id: int,
+        item: str,
+    ) -> None:
+        super().__init__()
+        self.db = db
+        self.trade_id = trade_id
+        self.seller_id = seller_id
+        self.buyer_id = buyer_id
+        self.initiator_id = initiator_id
+        self.item = item
+        self.close_button.custom_id = f"trade:threadclose:{trade_id}"
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id not in {self.seller_id, self.buyer_id} and not getattr(
+            interaction.user.guild_permissions, "manage_messages", False
+        ):
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "🚫 Not your trade",
+                    "Only the two traders or a moderator can close this thread.",
+                ),
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Close Trade", style=discord.ButtonStyle.danger, emoji="🔒")
+    async def close_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        completed = await self.db.complete_trade(self.trade_id)
+        if not completed:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "ℹ️ Trade already closed",
+                    f"Trade #{self.trade_id} is already marked finished.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        try:
+            if isinstance(interaction.channel, discord.Thread):
+                for user_id in (self.seller_id, self.buyer_id):
+                    try:
+                        await interaction.channel.remove_user(user_id)
+                    except discord.HTTPException:
+                        _log.warning(
+                            "Failed to remove %s from trade thread %s", user_id, interaction.channel.id
+                        )
+                try:
+                    await interaction.channel.edit(archived=True, locked=True)
+                except discord.HTTPException:
+                    pass
+        finally:
+            self.disable_all_items()
+            try:
+                if interaction.message:
+                    await interaction.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+        await interaction.response.send_message(
+            embed=info_embed(
+                "✅ Trade closed",
+                "Thread access has been revoked for participants. Thanks for trading!",
+            ),
+        )
+        await send_rating_prompts(
+            interaction.client,
+            self.db,
+            self.trade_id,
+            self.item,
+            self.seller_id,
+            self.buyer_id,
+        )
+
+
 class ReviewModal(discord.ui.Modal):
     def __init__(
         self, db: Database, trade_id: int, reviewer_id: int, target_id: int, item: str
@@ -1688,22 +1906,23 @@ class StorePostView(BasePersistentView):
             )
             return
 
-        channel_hint = "Reply to this post in the trade channel to negotiate the deal."
-        if isinstance(interaction.channel, discord.TextChannel):
-            channel_hint = (
-                f"Use {interaction.channel.mention} to chat with <@{self.poster_id}> about this trade."
-            )
-
-        await interaction.response.send_message(
-            embed=info_embed(
-                "🤝 Discuss in-channel",
-                (
-                    "DM trading is disabled. "
-                    f"{channel_hint}\n"
-                    "Keep the conversation in the server so everyone stays on the same page."
+        bot = getattr(interaction, "client", None)
+        if not isinstance(bot, TraderBot):
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "🚫 Unsupported action", "Please start this trade with the main trader bot."
                 ),
-            ),
-            ephemeral=True,
+                ephemeral=True,
+            )
+            return
+
+        item_label = f"Store trade with {self.poster_name or 'seller'}"
+        await bot._open_trade_thread(
+            interaction,
+            seller_id=self.poster_id,
+            buyer_id=interaction.user.id,
+            item=item_label,
+            initiator_id=interaction.user.id,
         )
 
     @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary)
