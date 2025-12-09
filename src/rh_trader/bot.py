@@ -297,9 +297,14 @@ class TraderBot(commands.Bot):
         self.stock_actions = StockGroup(self.db)
         self.wishlist_actions = WishlistGroup(self.db)
         self.alert_actions = AlertGroup(self.db, self._alert_limit)
+        self.trade_actions = TradeGroup(self.db)
 
     async def setup_hook(self) -> None:
         await self.db.setup()
+        self.tree.add_command(self.stock_actions)
+        self.tree.add_command(self.wishlist_actions)
+        self.tree.add_command(self.alert_actions)
+        self.tree.add_command(self.trade_actions)
         await self.add_misc_commands()
         await self.register_persistent_views()
         await self.tree.sync()
