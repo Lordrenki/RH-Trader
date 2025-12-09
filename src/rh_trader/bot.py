@@ -395,24 +395,34 @@ class TraderBot(commands.Bot):
             if location.value == "wishlist":
                 results = await db.search_wishlist(item)
                 results = await _resolve_guild_members(results)
-                description = "\n".join(
+                lines = [
                     (
                         f"🔍 {member.display_name} wants **{item}**"
                         + (f" — {note}" if note else "")
                         + (await _store_post_link(member))
                     )
                     for member, (_, item, note) in results
-                ) or "No matching wishlist items found from members of this server."
+                ]
+                description = (
+                    "\n".join(lines)
+                    if lines
+                    else "No matching wishlist items found from members of this server."
+                )
             else:
                 results = await db.search_stock(item)
                 results = await _resolve_guild_members(results)
-                description = "\n".join(
+                lines = [
                     (
                         f"🔍 {member.display_name} has **{item}** (x{qty})"
                         + (await _store_post_link(member))
                     )
                     for member, (_, item, qty) in results
-                ) or "No matching stock items found from members of this server."
+                ]
+                description = (
+                    "\n".join(lines)
+                    if lines
+                    else "No matching stock items found from members of this server."
+                )
 
             embed = info_embed("🔎 Search results", description)
             await interaction.response.send_message(
