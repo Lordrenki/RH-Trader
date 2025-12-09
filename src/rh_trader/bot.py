@@ -1243,21 +1243,21 @@ class TradeGroup(app_commands.Group):
         self.db = db
 
     @app_commands.command(
-        name="kudos", description="Give someone a quick star rating outside a trade"
+        name="rep", description="Give someone a quick star rating outside a trade"
     )
     @app_commands.describe(
-        partner="Member you want to rate", score="Number of stars to award (1-5)"
+        user="Member you want to rate", score="Number of stars to award (1-5)"
     )
-    async def kudos(
+    async def rep(
         self,
         interaction: discord.Interaction,
-        partner: discord.Member,
+        user: discord.Member,
         score: app_commands.Range[int, 1, 5],
     ):
-        if partner.id == interaction.user.id:
+        if user.id == interaction.user.id:
             await interaction.response.send_message(
                 embed=info_embed(
-                    "🚫 Invalid target", "You cannot give kudos to yourself."
+                    "🚫 Invalid target", "You cannot give rep to yourself."
                 ),
                 ephemeral=True,
             )
@@ -1265,7 +1265,7 @@ class TradeGroup(app_commands.Group):
 
         recorded, retry_after = await self.db.record_quick_rating(
             interaction.user.id,
-            partner.id,
+            user.id,
             score,
             QUICK_RATING_COOLDOWN_SECONDS,
         )
@@ -1274,7 +1274,7 @@ class TradeGroup(app_commands.Group):
             await interaction.response.send_message(
                 embed=info_embed(
                     "⏳ On cooldown",
-                    f"You recently rated {partner.mention}. You can send another kudos in {wait_label}.",
+                    f"You recently rated {user.mention}. You can send another rep in {wait_label}.",
                 ),
                 ephemeral=True,
             )
@@ -1288,13 +1288,13 @@ class TradeGroup(app_commands.Group):
             response_count,
             *_,
             stored_premium,
-        ) = await self.db.profile(partner.id)
+        ) = await self.db.profile(user.id)
         premium_flag = bool(stored_premium)
         await interaction.response.send_message(
             embed=info_embed(
-                "⭐ Kudos sent",
+                "⭐ Rep sent",
                 (
-                    f"You rated {partner.mention} {score} star(s).\n"
+                    f"You rated {user.mention} {score} star(s).\n"
                     f"Their profile now shows: {rating_summary(avg_score, rating_count, premium_boost=premium_flag)}"
                     f" • {response_summary(response_score, response_count, premium_boost=premium_flag)}"
                 ),
