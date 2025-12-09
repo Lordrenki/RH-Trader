@@ -63,9 +63,11 @@ async def test_ratings_and_leaderboard(tmp_path: Path):
 
     leaderboard = await db.leaderboard()
     assert leaderboard[0][0] == 1  # User 1 should have higher average
-    contact, score, count = await db.profile(1)
+    contact, score, count, response_score, response_count = await db.profile(1)
     assert score == pytest.approx(4.0)
     assert count == 2
+    assert response_score == 0
+    assert response_count == 0
 
 
 async def test_quick_rating_cooldown(tmp_path: Path):
@@ -142,6 +144,10 @@ async def test_trade_flow(tmp_path: Path):
     assert recorded
     duplicate = await db.record_trade_rating(trade_id, 5, 6, 4, "seller")
     assert duplicate is False
+
+    _, _, _, response_score, response_count = await db.profile(5)
+    assert response_count == 1
+    assert 1 <= response_score <= 10
 
 
 async def test_trade_channel_settings(tmp_path: Path):
