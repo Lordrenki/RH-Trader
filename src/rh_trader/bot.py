@@ -107,6 +107,38 @@ def _paginate_field_entries(entries: list, formatter, per_page: int) -> list[str
     return pages
 
 
+def _listing_limit_for_interaction(interaction: discord.Interaction) -> int:
+    """Return how many stock/wishlist entries a user may store."""
+
+    client = getattr(interaction, "client", None)
+    has_premium = getattr(client, "_has_store_premium", None)
+    tier = has_premium(interaction) if callable(has_premium) else None
+
+    return tier.listing_limit if tier else DEFAULT_STORE_LISTING_LIMIT
+
+
+async def _enforce_listing_limit(
+    interaction: discord.Interaction, current_count: int, list_name: str
+) -> bool:
+    """Guard against adding more entries than the user is allowed."""
+
+    limit = _listing_limit_for_interaction(interaction)
+    if current_count < limit:
+        return False
+
+    await interaction.response.send_message(
+        embed=info_embed(
+            "🚫 Limit reached",
+            (
+                f"You can only save up to {limit} {list_name} items unless you have "
+                "a premium store tier."
+            ),
+        ),
+        ephemeral=True,
+    )
+    return True
+
+
 async def _lookup_display_name(client: discord.Client, user_id: int) -> str:
     user = client.get_user(user_id)
     if user is None:
@@ -915,8 +947,23 @@ class StockGroup(app_commands.Group):
     @app_commands.describe(item="Item name", quantity="How many you have")
     async def add(self, interaction: discord.Interaction, item: str, quantity: int = 1):
         qty = max(1, quantity)
-        await self.db.add_stock(interaction.user.id, item, qty)
-        embed = info_embed("📦 Stock updated", f"Added **{item}** x{qty} to your inventory.")
+        item_name = item.strip()
+        if not item_name:
+            await interaction.response.send_message(
+                embed=info_embed("⚠️ Item required", "Please enter an item name."),
+                ephemeral=True,
+            )
+            return
+
+        stock = await self.db.get_stock(interaction.user.id)
+        if not any(name.lower() == item_name.lower() for name, _ in stock):
+            if await _enforce_listing_limit(interaction, len(stock), "stock"):
+                return
+
+        await self.db.add_stock(interaction.user.id, item_name, qty)
+        embed = info_embed(
+            "📦 Stock updated", f"Added **{item_name}** x{qty} to your inventory."
+        )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(
@@ -1116,8 +1163,21 @@ class WishlistGroup(app_commands.Group):
     @app_commands.command(name="add", description="Add an item to your wishlist")
     @app_commands.describe(item="Item to add", note="Optional note like target price")
     async def add(self, interaction: discord.Interaction, item: str, note: str = ""):
-        await self.db.add_wishlist(interaction.user.id, item, note)
-        embed = info_embed("🎯 Wishlist updated", f"Added **{item}** to your wishlist.")
+        item_name = item.strip()
+        if not item_name:
+            await interaction.response.send_message(
+                embed=info_embed("⚠️ Item required", "Please enter an item name."),
+                ephemeral=True,
+            )
+            return
+
+        wishlist = await self.db.get_wishlist(interaction.user.id)
+        if not any(name.lower() == item_name.lower() for name, _ in wishlist):
+            if await _enforce_listing_limit(interaction, len(wishlist), "wishlist"):
+                return
+
+        await self.db.add_wishlist(interaction.user.id, item_name, note)
+        embed = info_embed("🎯 Wishlist updated", f"Added **{item_name}** to your wishlist.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="view", description="View wishlist for you or another member")
@@ -1313,6 +1373,11 @@ class StockAddModal(discord.ui.Modal):
             )
             return
 
+        stock = await self.db.get_stock(interaction.user.id)
+        if not any(name.lower() == item_name.lower() for name, _ in stock):
+            if await _enforce_listing_limit(interaction, len(stock), "stock"):
+                return
+
         await self.db.add_stock(interaction.user.id, item_name, qty)
         embed = info_embed("📦 Stock updated", f"Added **{item_name}** x{qty} to your inventory.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -1346,6 +1411,11 @@ class WishlistAddModal(discord.ui.Modal):
                 ephemeral=True,
             )
             return
+
+        wishlist = await self.db.get_wishlist(interaction.user.id)
+        if not any(name.lower() == item_name.lower() for name, _ in wishlist):
+            if await _enforce_listing_limit(interaction, len(wishlist), "wishlist"):
+                return
 
         await self.db.add_wishlist(interaction.user.id, item_name, note)
         embed = info_embed(
