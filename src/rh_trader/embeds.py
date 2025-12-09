@@ -40,13 +40,37 @@ def format_requests(entries: Iterable[Tuple[int, str, int, str]]) -> str:
     return "\n".join(lines) or "No requests posted yet."
 
 
-def rating_summary(score: float, count: int) -> str:
+def rating_summary(
+    score: float,
+    count: int,
+    *,
+    premium_boost: bool = False,
+    boost_percent: float = 0.05,
+) -> str:
     if count == 0:
         return "No ratings yet"
-    return f"⭐ {score:.2f} average from {count} ratings"
+
+    adjusted_score = score
+    if premium_boost:
+        adjusted_score = min(5.0, score * (1 + boost_percent))
+    suffix = " (Premium boost)" if premium_boost else ""
+
+    return f"⭐ {adjusted_score:.2f} average from {count} ratings{suffix}"
 
 
-def response_summary(score: float, count: int) -> str:
+def response_summary(
+    score: float,
+    count: int,
+    *,
+    premium_boost: bool = False,
+    boost_percent: float = 0.05,
+) -> str:
     if count == 0:
         return "⚡ No response data yet"
-    return f"⚡ {score:.1f}/10 response speed across {count} trades"
+
+    adjusted_score = score
+    if premium_boost:
+        adjusted_score = min(10.0, score * (1 + boost_percent))
+    suffix = " (Premium boost)" if premium_boost else ""
+
+    return f"⚡ {adjusted_score:.1f}/10 response speed across {count} trades{suffix}"
