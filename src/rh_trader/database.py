@@ -860,16 +860,18 @@ class Database:
                         )
                 await db.commit()
 
-    async def leaderboard(self, limit: int = 10) -> List[Tuple[int, float, int]]:
+    async def leaderboard(self, limit: int = 10) -> List[Tuple[int, float, int, bool]]:
         async with self._connect() as db:
             cursor = await db.execute(
                 "SELECT user_id,\n"
                 "CASE WHEN rating_count = 0 THEN 0 ELSE CAST(rating_total AS FLOAT) / rating_count END AS score,\n"
-                "rating_count\n"
+                "rating_count,\n"
+                "is_premium\n"
                 "FROM users ORDER BY score DESC, rating_count DESC LIMIT ?",
                 (limit,),
             )
-            return await cursor.fetchall()
+            rows = await cursor.fetchall()
+            return [(user_id, score, count, bool(is_premium)) for user_id, score, count, is_premium in rows]
 
     async def profile(self, user_id: int) -> Tuple[str, float, int, float, int, str, str, bool]:
         async with self._connect() as db:

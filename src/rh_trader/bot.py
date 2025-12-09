@@ -132,8 +132,8 @@ async def build_store_embeds(
     total_pages = max(len(stock_pages), len(wishlist_pages), 1)
 
     embeds: list[discord.Embed] = []
-    rating_line = rating_summary(score, count)
-    response_line = response_summary(response_score, response_count)
+    rating_line = rating_summary(score, count, premium_boost=premium_flag)
+    response_line = response_summary(response_score, response_count, premium_boost=premium_flag)
     descriptor_lines = [f"{rating_line} • {response_line}"]
     if store_tier_name:
         descriptor_lines.append(f"🏅 {store_tier_name}")
@@ -381,9 +381,9 @@ class TraderBot(commands.Bot):
 
             trade_label = "trade" if trades == 1 else "trades"
             description_lines = [
-                rating_summary(score, count),
+                rating_summary(score, count, premium_boost=premium_flag),
                 f"🤝 {trades} {trade_label} completed",
-                response_summary(response_score, response_count),
+                response_summary(response_score, response_count, premium_boost=premium_flag),
                 f"💎 Status: {'Premium' if premium_flag else 'Standard user'}",
             ]
 
@@ -422,7 +422,8 @@ class TraderBot(commands.Bot):
                 )
                 return
             description = "\n".join(
-                f"{idx+1}. <@{user_id}> — {rating_summary(score, count)}" for idx, (user_id, score, count) in enumerate(rows)
+                f"{idx+1}. <@{user_id}> — {rating_summary(score, count, premium_boost=is_premium)}"
+                for idx, (user_id, score, count, is_premium) in enumerate(rows)
             )
             await interaction.response.send_message(embed=info_embed("🏆 Leaderboard", description))
 
@@ -667,15 +668,15 @@ class TraderBot(commands.Bot):
             await self.db.profile(poster.id)
         )
         trades = await self.db.trade_count(poster.id)
+        premium_flag = bool(stored_premium)
         profile_lines = [
-            rating_summary(score, count),
-            response_summary(response_score, response_count),
+            rating_summary(score, count, premium_boost=premium_flag),
+            response_summary(response_score, response_count, premium_boost=premium_flag),
             f"🤝 {trades} trade{'s' if trades != 1 else ''} completed",
         ]
         if contact:
             profile_lines.append(f"📞 Contact: {contact}")
 
-        premium_flag = bool(stored_premium)
         color = PREMIUM_EMBED_COLOR if premium_flag else DEFAULT_EMBED_COLOR
 
         for target_id, pairs in aggregated.items():
@@ -950,14 +951,16 @@ class TradeGroup(app_commands.Group):
             response_score,
             response_count,
             *_,
+            stored_premium,
         ) = await self.db.profile(partner.id)
+        premium_flag = bool(stored_premium)
         await interaction.response.send_message(
             embed=info_embed(
                 "⭐ Kudos sent",
                 (
                     f"You rated {partner.mention} {score} star(s).\n"
-                    f"Their profile now shows: {rating_summary(avg_score, rating_count)}"
-                    f" • {response_summary(response_score, response_count)}"
+                    f"Their profile now shows: {rating_summary(avg_score, rating_count, premium_boost=premium_flag)}"
+                    f" • {response_summary(response_score, response_count, premium_boost=premium_flag)}"
                 ),
             ),
             ephemeral=True,
@@ -1458,12 +1461,14 @@ async def send_trade_invites(
                     response_score,
                     response_count,
                     *_,
+                    stored_premium,
                 ) = await db.profile(partner_id)
+                premium_flag = bool(stored_premium)
                 trades = await db.trade_count(partner_id)
                 trade_label = "trade" if trades == 1 else "trades"
                 stats_line = (
-                    f"\nTrader stats for <@{partner_id}>: {rating_summary(score, rating_count)}"
-                    f" • {response_summary(response_score, response_count)}"
+                    f"\nTrader stats for <@{partner_id}>: {rating_summary(score, rating_count, premium_boost=premium_flag)}"
+                    f" • {response_summary(response_score, response_count, premium_boost=premium_flag)}"
                     f" • {trades} {trade_label} completed."
                 )
             pending_note = (
