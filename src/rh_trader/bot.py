@@ -255,9 +255,6 @@ class TraderBot(commands.Bot):
 
     async def setup_hook(self) -> None:
         await self.db.setup()
-        self.tree.add_command(StockGroup(self.db))
-        self.tree.add_command(TradeGroup(self.db))
-        self.tree.add_command(WishlistGroup(self.db))
         self.tree.add_command(AlertGroup(self.db, self._alert_limit))
         await self.add_misc_commands()
         await self.register_persistent_views()
@@ -391,8 +388,8 @@ class TraderBot(commands.Bot):
                 ),
             )
 
-        @self.tree.command(description="Open a quick trading control panel")
-        async def storemenu(interaction: discord.Interaction):
+        @self.tree.command(name="store", description="Open a quick trading control panel")
+        async def store(interaction: discord.Interaction):
             embed = info_embed(
                 "🧰 Trade menu",
                 (
@@ -1661,7 +1658,7 @@ class TradeMenuView(discord.ui.View):
     @discord.ui.button(label="Close", style=discord.ButtonStyle.primary, emoji="🚪", row=2)
     async def close(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.edit_message(
-            embed=info_embed("Closed", "You can reopen /storemenu anytime."), view=None
+            embed=info_embed("Closed", "You can reopen /store anytime."), view=None
         )
 
 
