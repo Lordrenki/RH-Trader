@@ -135,6 +135,12 @@ class Database:
                     user_id INTEGER PRIMARY KEY,
                     trade_id INTEGER NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS alerts (
+                    user_id INTEGER NOT NULL,
+                    item TEXT NOT NULL,
+                    PRIMARY KEY (user_id, item)
+                );
                 """
             )
             await db.commit()
@@ -381,6 +387,63 @@ class Database:
                 (user_id,),
             )
             return await cursor.fetchall()
+
+    async def add_alert(self, user_id: int, item: str) -> None:
+        await self.ensure_user(user_id)
+        async with self._lock:
+            async with self._connect() as db:
+                await db.execute(
+                    "INSERT OR IGNORE INTO alerts(user_id, item) VALUES (?, ?)",
+                    (user_id, item.strip()),
+                )
+                await db.commit()
+
+    async def remove_alert(self, user_id: int, item: str) -> bool:
+        async with self._lock:
+            async with self._connect() as db:
+                cursor = await db.execute(
+                    "DELETE FROM alerts WHERE user_id = ? AND item = ?",
+                    (user_id, item.strip()),
+                )
+                await db.commit()
+                return cursor.rowcount > 0
+
+    async def get_alerts(self, user_id: int) -> List[str]:
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "SELECT item FROM alerts WHERE user_id = ? ORDER BY item", (user_id,)
+            )
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
+
+    async def matching_alerts_for_items(
+        self, items: List[str], *, threshold: int = 80
+    ) -> List[Tuple[int, str, str]]:
+        """Find alert subscribers whose terms fuzzy-match the provided items.
+
+        Returns tuples of (user_id, alert_item, matched_item).
+        """
+
+        normalized_items = [
+            (item, self._normalize_text(item)) for item in items if item.strip()
+        ]
+        if not normalized_items:
+            return []
+
+        async with self._connect() as db:
+            cursor = await db.execute("SELECT user_id, item FROM alerts")
+            alerts = await cursor.fetchall()
+
+        matches: list[Tuple[int, str, str]] = []
+        for user_id, alert_item in alerts:
+            normalized_alert = self._normalize_text(alert_item)
+            for original_item, normalized_item in normalized_items:
+                score = fuzz.WRatio(normalized_alert, normalized_item)
+                if score >= threshold:
+                    matches.append((user_id, alert_item, original_item))
+                    break
+
+        return matches
 
     async def record_rating(self, user_id: int, rating: int) -> None:
         await self.ensure_user(user_id)
