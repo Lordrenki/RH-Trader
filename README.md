@@ -3,8 +3,8 @@
 A Discord bot built with `discord.py` that tracks trading inventories, offers, requests, trades, and wishlists with emoji-rich embeds.
 
 ## Features
-- Slash commands for managing stock, wishlists, search, profiles, trades, and leaderboards.
-- Modal-driven trade menu that bundles common actions with Discord Components.
+- Slash commands for searching, alerts, profiles, and a consolidated store workflow.
+- Modal-driven trade menu that bundles stock, wishlist, and store posting actions behind buttons.
 - SQLite persistence via `aiosqlite` to store user inventories, ratings, and wishlists.
 - Permission-aware profile/stock viewing when targeting other users.
 - Emoji-enhanced embeds for friendly UX and clear feedback.
@@ -28,35 +28,15 @@ A Discord bot built with `discord.py` that tracks trading inventories, offers, r
    ```
 
 ## Commands
-- `/storemenu` — open the trading control panel with buttons and modals
+- `/store` — open the all-in-one trading control panel with buttons and modals for stock, wishlist, and posting
 - `/search <item> <location>` — search member stock or wishlists for a keyword
+- `/alerts add|view|remove` — manage item alerts; limits scale with premium tier
 - `/profile [user]` — view a trading profile with ratings, response stats, bio, and reviews
 - `/leaderboard` — show the top-rated traders
-- `/set_trade_channel <channel>` — pick where `/poststore` submissions are published
-- `/poststore [image]` — post your store embeds to the configured channel
+- `/set_trade_channel <channel>` — pick where `/store` submissions are published
+- `/poststore [image]` — post your store embeds to the configured channel (also available via `/store`)
 
-### Trading commands
-- `/trade start <partner> <item>` — open a trade and move the conversation to DMs
-- `/trade kudos <partner> <score>` — send a quick 1–5 star rating outside a trade with cooldown enforcement
-
-### Stock commands
-- `/stock add <item> [quantity]` — add inventory entries
-- `/stock change <item> <quantity>` — update an existing item quantity (set to 0 to remove)
-- `/stock view [user]` — view your own or another member's stock list
-- `/stock remove <item>` — fuzzy-remove an item from your stock
-- `/stock clear` — wipe your inventory list
-
-### Wishlist commands
-- `/wishlist add <item> [note]` — add an item you want with an optional note
-- `/wishlist view [user]` — view your wishlist or another member's
-- `/wishlist remove <item>` — fuzzy-remove a wishlist entry
-
-### Alert commands
-- `/alerts add <item>` — create an item alert; limits scale with premium tier
-- `/alerts view` — list your alert entries
-- `/alerts remove <item>` — fuzzy-remove an alert item
-
-Profiles, stock, and wishlist viewing accept an optional `user` argument; targeting others requires users with manage guild/message permissions.
+Profile viewing accepts an optional `user` argument; targeting others requires users with manage guild/message permissions.
 
 ## Testing
 Run the test suite with `pytest` from the repository root. The tests use temporary SQLite files and require no Discord connection.
