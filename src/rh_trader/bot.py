@@ -107,7 +107,18 @@ def _paginate_field_entries(entries: list, formatter, per_page: int) -> list[str
     return pages
 
 
+async def _lookup_display_name(client: discord.Client, user_id: int) -> str:
+    user = client.get_user(user_id)
+    if user is None:
+        try:
+            user = await client.fetch_user(user_id)
+        except discord.HTTPException:
+            return f"User {user_id}"
+    return user.display_name
+
+
 async def build_store_embeds(
+    client: discord.Client,
     db: Database,
     user_id: int,
     display_name: str,
@@ -167,7 +178,8 @@ async def build_store_embeds(
         embed.add_field(name="🎯 Wishlist", value=wishlist_value, inline=False)
         if latest_review:
             reviewer_id, review_text, _ = latest_review
-            review_value = f"{review_text}\n— <@{reviewer_id}>"
+            reviewer_name = await _lookup_display_name(client, reviewer_id)
+            review_value = f"{review_text}\n— {reviewer_name}"
             embed.add_field(
                 name="📝 Latest review", value=review_value, inline=False
             )
@@ -221,6 +233,7 @@ class TraderBot(commands.Bot):
                 avatar_url = None
 
             embeds = await build_store_embeds(
+                self,
                 self.db,
                 user_id,
                 display_name,
@@ -409,7 +422,8 @@ class TraderBot(commands.Bot):
             if reviews:
                 review_lines = []
                 for reviewer_id, review_text, _ in reviews:
-                    review_lines.append(f"• {review_text}\n— <@{reviewer_id}>")
+                    reviewer_name = await _lookup_display_name(interaction.client, reviewer_id)
+                    review_lines.append(f"• {review_text}\n— {reviewer_name}")
                 reviews_value = "\n\n".join(review_lines)
             else:
                 reviews_value = "No reviews yet."
@@ -575,6 +589,7 @@ class TraderBot(commands.Bot):
         image_url = image.url if image else None
         stock = await db.get_stock(interaction.user.id)
         embeds = await build_store_embeds(
+            interaction.client,
             db,
             interaction.user.id,
             interaction.user.display_name,
@@ -721,6 +736,7 @@ class TraderBot(commands.Bot):
         listing_limit = max(1, listing_limit or DEFAULT_STORE_LISTING_LIMIT)
         badge_url = PREMIUM_BADGE_URL if is_premium else None
         embeds = await build_store_embeds(
+            interaction.client,
             self.db,
             interaction.user.id,
             interaction.user.display_name,
@@ -1856,6 +1872,7 @@ class StorePostView(BasePersistentView):
             display_name = self.poster_name or f"User {self.poster_id}"
 
         embeds = await build_store_embeds(
+            interaction.client,
             self.db,
             self.poster_id,
             display_name,
