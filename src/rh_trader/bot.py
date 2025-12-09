@@ -1185,9 +1185,7 @@ class StockGroup(app_commands.Group):
             ephemeral=True,
         )
 
-    @app_commands.command(name="view", description="View stock for you or another member")
-    @app_commands.describe(user="Member to view")
-    async def view(self, interaction: discord.Interaction, user: Optional[discord.User] = None):
+    async def show(self, interaction: discord.Interaction, user: Optional[discord.User] = None):
         target = user or interaction.user
         if not _can_view_other(interaction, target):
             await interaction.response.send_message(
@@ -1198,6 +1196,16 @@ class StockGroup(app_commands.Group):
         items = await self.db.get_stock(target.id)
         embed = info_embed(f"📦 Inventory for {target.display_name}", format_stock(items))
         await interaction.response.send_message(embed=embed)
+
+    async def clear_list(self, interaction: discord.Interaction):
+        await self.db.clear_stock(interaction.user.id)
+        embed = info_embed("🗑️ Stock cleared", "Your inventory list is now empty.")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="view", description="View stock for you or another member")
+    @app_commands.describe(user="Member to view")
+    async def view(self, interaction: discord.Interaction, user: Optional[discord.User] = None):
+        await self.show(interaction, user)
 
     @app_commands.command(name="remove", description="Remove an item from your stock list")
     @app_commands.describe(item="Item to remove (fuzzy matched against your stock)")
@@ -1242,9 +1250,7 @@ class StockGroup(app_commands.Group):
 
     @app_commands.command(name="clear", description="Clear all items from your stock list")
     async def clear(self, interaction: discord.Interaction):
-        await self.db.clear_stock(interaction.user.id)
-        embed = info_embed("🗑️ Stock cleared", "Your inventory list is now empty.")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await self.clear_list(interaction)
 
 
 class TradeGroup(app_commands.Group):
@@ -1338,9 +1344,9 @@ class WishlistGroup(app_commands.Group):
         embed = info_embed("🎯 Wishlist updated", f"Added **{item_name}** to your wishlist.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="view", description="View wishlist for you or another member")
-    @app_commands.describe(user="Member to view")
-    async def view(self, interaction: discord.Interaction, user: Optional[discord.User] = None):
+    async def show(
+        self, interaction: discord.Interaction, user: Optional[discord.User] = None
+    ):
         target = user or interaction.user
         if not _can_view_other(interaction, target):
             await interaction.response.send_message(
@@ -1351,6 +1357,11 @@ class WishlistGroup(app_commands.Group):
         entries = await self.db.get_wishlist(target.id)
         embed = info_embed(f"🎯 Wishlist for {target.display_name}", format_wishlist(entries))
         await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(name="view", description="View wishlist for you or another member")
+    @app_commands.describe(user="Member to view")
+    async def view(self, interaction: discord.Interaction, user: Optional[discord.User] = None):
+        await self.show(interaction, user)
 
     @app_commands.command(name="remove", description="Remove an item from your wishlist")
     @app_commands.describe(item="Item to remove (fuzzy matched against your wishlist)")
@@ -1431,8 +1442,7 @@ class AlertGroup(app_commands.Group):
             ephemeral=True,
         )
 
-    @app_commands.command(name="view", description="See your alert list")
-    async def view(self, interaction: discord.Interaction):
+    async def show(self, interaction: discord.Interaction):
         alerts = await self.db.get_alerts(interaction.user.id)
         if not alerts:
             await interaction.response.send_message(
@@ -1445,6 +1455,10 @@ class AlertGroup(app_commands.Group):
         await interaction.response.send_message(
             embed=info_embed("🔔 Alerts", description), ephemeral=True
         )
+
+    @app_commands.command(name="view", description="See your alert list")
+    async def view(self, interaction: discord.Interaction):
+        await self.show(interaction)
 
     @app_commands.command(name="remove", description="Delete an alert item")
     @app_commands.describe(item="Item to remove (fuzzy matched against your alerts)")
@@ -1675,7 +1689,7 @@ class TradeMenuView(discord.ui.View):
 
     async def _confirm_clear_stock(self, interaction: discord.Interaction) -> None:
         async def confirm(inter: discord.Interaction) -> None:
-            await self._stock_handler.clear(inter)
+            await self._stock_handler.clear_list(inter)
             if inter.message:
                 try:
                     await inter.followup.edit_message(
@@ -1697,7 +1711,7 @@ class TradeMenuView(discord.ui.View):
 
     @discord.ui.button(label="View Stock", style=discord.ButtonStyle.secondary, emoji="📦", row=0)
     async def stock_view(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self._stock_handler.view(interaction, None)
+        await self._stock_handler.show(interaction, None)
 
     @discord.ui.button(label="Add Stock", style=discord.ButtonStyle.primary, emoji="🧺", row=0)
     async def stock_add(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -1713,7 +1727,7 @@ class TradeMenuView(discord.ui.View):
 
     @discord.ui.button(label="View Wishlist", style=discord.ButtonStyle.secondary, emoji="📋", row=1)
     async def wishlist_view(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self._wishlist_handler.view(interaction, None)
+        await self._wishlist_handler.show(interaction, None)
 
     @discord.ui.button(label="Add Wishlist", style=discord.ButtonStyle.primary, emoji="📌", row=1)
     async def wishlist_add(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -1727,7 +1741,7 @@ class TradeMenuView(discord.ui.View):
 
     @discord.ui.button(label="View Alerts", style=discord.ButtonStyle.secondary, emoji="🔔", row=2)
     async def alerts_view(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self._alert_handler.view(interaction)
+        await self._alert_handler.show(interaction)
 
     @discord.ui.button(label="Add Alert", style=discord.ButtonStyle.primary, emoji="➕", row=2)
     async def alerts_add(self, interaction: discord.Interaction, _: discord.ui.Button):
