@@ -132,6 +132,7 @@ async def build_store_embeds(
     total_pages = max(len(stock_pages), len(wishlist_pages), 1)
 
     embeds: list[discord.Embed] = []
+    premium_flag = is_premium or bool(stored_premium)
     rating_line = rating_summary(score, count, premium_boost=premium_flag)
     response_line = response_summary(response_score, response_count, premium_boost=premium_flag)
     descriptor_lines = [f"{rating_line} • {response_line}"]
@@ -139,8 +140,6 @@ async def build_store_embeds(
         descriptor_lines.append(f"🏅 {store_tier_name}")
     if contact:
         descriptor_lines.append(f"📞 Contact: {contact}")
-
-    premium_flag = is_premium or bool(stored_premium)
 
     color = PREMIUM_EMBED_COLOR if premium_flag else DEFAULT_EMBED_COLOR
     author_label = (
