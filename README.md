@@ -28,7 +28,7 @@ A Discord bot built with `discord.py` that tracks trading inventories, offers, r
    ```
 
 ## Commands
-- `/trademenu` — open the trading control panel with buttons and modals
+- `/storemenu` — open the trading control panel with buttons and modals
 - `/stock add <item> [quantity]`
 - `/stock view [user]`
 - `/stock remove` (modal-driven)
