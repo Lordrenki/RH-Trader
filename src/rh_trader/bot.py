@@ -119,7 +119,9 @@ async def build_store_embeds(
     badge_url: str | None,
     image_url: str | None,
 ) -> list[discord.Embed]:
-    contact, score, count, response_score, response_count = await db.profile(user_id)
+    contact, score, count, response_score, response_count, _, _, stored_premium = await db.profile(
+        user_id
+    )
     latest_review = await db.latest_review_for_user(user_id)
     stock = await db.get_stock(user_id)
     wishlist = await db.get_wishlist(user_id)
@@ -138,7 +140,9 @@ async def build_store_embeds(
     if contact:
         descriptor_lines.append(f"📞 Contact: {contact}")
 
-    color = PREMIUM_EMBED_COLOR if is_premium else DEFAULT_EMBED_COLOR
+    premium_flag = is_premium or bool(stored_premium)
+
+    color = PREMIUM_EMBED_COLOR if premium_flag else DEFAULT_EMBED_COLOR
     author_label = (
         f"{display_name} • {store_tier_name}" if store_tier_name else display_name
     )
@@ -157,8 +161,9 @@ async def build_store_embeds(
             embed.set_author(name=author_label, icon_url=avatar_url)
         else:
             embed.set_author(name=author_label)
-        if badge_url:
-            embed.set_thumbnail(url=badge_url)
+        thumbnail_url = badge_url or (PREMIUM_BADGE_URL if premium_flag else None)
+        if thumbnail_url:
+            embed.set_thumbnail(url=thumbnail_url)
         embed.add_field(name="📦 Inventory", value=stock_value, inline=False)
         embed.add_field(name="🎯 Wishlist", value=wishlist_value, inline=False)
         if latest_review:
@@ -354,17 +359,57 @@ class TraderBot(commands.Bot):
                 )
                 return
 
-            _, score, count, response_score, response_count = await db.profile(target.id)
-            stock = await db.get_stock(target.id)
-            wishlist = await db.get_wishlist(target.id)
+            (
+                _,
+                score,
+                count,
+                response_score,
+                response_count,
+                timezone,
+                bio,
+                stored_premium,
+            ) = await db.profile(target.id)
+            trades = await db.trade_count(target.id)
+            reviews = await db.recent_reviews_for_user(target.id, 3)
+
+            is_self = target.id == interaction.user.id
+            premium_tier = self._has_store_premium(interaction) if is_self else None
+            if premium_tier is not None:
+                await db.set_premium_status(target.id, True)
+            premium_flag = bool(premium_tier) or bool(stored_premium)
+
+            trade_label = "trade" if trades == 1 else "trades"
+            description_lines = [
+                rating_summary(score, count),
+                f"🤝 {trades} {trade_label} completed",
+                response_summary(response_score, response_count),
+                f"💎 Status: {'Premium' if premium_flag else 'Standard user'}",
+            ]
+
             embed = info_embed(
                 f"🧾 Profile for {target.display_name}",
-                description="\n".join(
-                    [rating_summary(score, count), response_summary(response_score, response_count)]
-                ),
+                description="\n".join(description_lines),
             )
-            embed.add_field(name="📦 Inventory", value=format_stock(stock), inline=False)
-            embed.add_field(name="🎯 Wishlist", value=format_wishlist(wishlist), inline=False)
+            embed.add_field(
+                name="🕰️ Time zone",
+                value=timezone or "Not set",
+                inline=False,
+            )
+            embed.add_field(
+                name="✍️ Bio",
+                value=bio or "No bio set yet.",
+                inline=False,
+            )
+
+            if reviews:
+                review_lines = []
+                for reviewer_id, review_text, _ in reviews:
+                    review_lines.append(f"• {review_text}\n— <@{reviewer_id}>")
+                reviews_value = "\n\n".join(review_lines)
+            else:
+                reviews_value = "No reviews yet."
+
+            embed.add_field(name="📝 Recent reviews", value=reviews_value, inline=False)
             await interaction.response.send_message(embed=embed)
 
         @self.tree.command(description="View top rated traders")
@@ -486,6 +531,7 @@ class TraderBot(commands.Bot):
         now_ts = int(time.time())
         window_start = now_ts - STORE_POST_WINDOW_SECONDS
         store_tier = self._has_store_premium(interaction)
+        await db.set_premium_status(interaction.user.id, bool(store_tier))
         recent_posts, oldest_post = await db.store_post_window(
             interaction.guild.id, interaction.user.id, window_start
         )
@@ -809,9 +855,14 @@ class TradeGroup(app_commands.Group):
             )
             return
 
-        _, avg_score, rating_count, response_score, response_count = await self.db.profile(
-            partner.id
-        )
+        (
+            _,
+            avg_score,
+            rating_count,
+            response_score,
+            response_count,
+            *_,
+        ) = await self.db.profile(partner.id)
         await interaction.response.send_message(
             embed=info_embed(
                 "⭐ Kudos sent",
@@ -1082,6 +1133,49 @@ class RemoveWishlistModal(discord.ui.Modal):
         )
 
 
+class BioModal(discord.ui.Modal):
+    def __init__(self, db: Database):
+        super().__init__(title="Update your bio")
+        self.db = db
+        self.bio_input = discord.ui.TextInput(
+            label="Short bio",
+            style=discord.TextStyle.paragraph,
+            max_length=200,
+            required=False,
+            placeholder="Tell others who you are as a trader",
+        )
+        self.add_item(self.bio_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        bio = (self.bio_input.value or "").strip()
+        await self.db.set_bio(interaction.user.id, bio)
+        message = "Bio cleared." if not bio else "Bio updated."
+        await interaction.response.send_message(
+            embed=info_embed("✍️ Bio saved", message), ephemeral=True
+        )
+
+
+class TimezoneModal(discord.ui.Modal):
+    def __init__(self, db: Database):
+        super().__init__(title="Set your time zone")
+        self.db = db
+        self.timezone_input = discord.ui.TextInput(
+            label="Time zone",
+            placeholder="e.g., UTC-5 / EST",
+            max_length=50,
+            required=False,
+        )
+        self.add_item(self.timezone_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        timezone = (self.timezone_input.value or "").strip()
+        await self.db.set_timezone(interaction.user.id, timezone)
+        message = "Time zone cleared." if not timezone else f"Time zone set to {timezone}."
+        await interaction.response.send_message(
+            embed=info_embed("🕰️ Time zone saved", message), ephemeral=True
+        )
+
+
 class TradeMenuView(discord.ui.View):
     def __init__(
         self,
@@ -1144,6 +1238,14 @@ class TradeMenuView(discord.ui.View):
     async def wishlist_remove(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.send_modal(RemoveWishlistModal(self.db))
 
+    @discord.ui.button(label="Set Bio", style=discord.ButtonStyle.secondary, emoji="✍️", row=2)
+    async def set_bio(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(BioModal(self.db))
+
+    @discord.ui.button(label="Set Time Zone", style=discord.ButtonStyle.secondary, emoji="🕰️", row=2)
+    async def set_timezone(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(TimezoneModal(self.db))
+
     @discord.ui.button(label="Post Store", style=discord.ButtonStyle.primary, emoji="🏪", row=2)
     async def poststore(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self._store_post_handler(interaction, None)
@@ -1173,9 +1275,14 @@ async def send_trade_invites(
             is_seller = user_id == seller_id
             stats_line = ""
             if is_seller and status == "pending":
-                _, score, rating_count, response_score, response_count = await db.profile(
-                    partner_id
-                )
+                (
+                    _,
+                    score,
+                    rating_count,
+                    response_score,
+                    response_count,
+                    *_,
+                ) = await db.profile(partner_id)
                 trades = await db.trade_count(partner_id)
                 trade_label = "trade" if trades == 1 else "trades"
                 stats_line = (

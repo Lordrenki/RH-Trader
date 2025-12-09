@@ -63,11 +63,34 @@ async def test_ratings_and_leaderboard(tmp_path: Path):
 
     leaderboard = await db.leaderboard()
     assert leaderboard[0][0] == 1  # User 1 should have higher average
-    contact, score, count, response_score, response_count = await db.profile(1)
+    contact, score, count, response_score, response_count, timezone, bio, is_premium = await db.profile(1)
     assert score == pytest.approx(4.0)
     assert count == 2
     assert response_score == 0
     assert response_count == 0
+    assert timezone == ""
+    assert bio == ""
+    assert is_premium is False
+
+
+async def test_profile_fields(tmp_path: Path):
+    db = await init_db(tmp_path)
+    await db.set_timezone(1, "UTC-5 / EST")
+    await db.set_bio(1, "Friendly trader")
+    await db.set_premium_status(1, True)
+
+    profile = await db.profile(1)
+    assert profile[5] == "UTC-5 / EST"
+    assert profile[6] == "Friendly trader"
+    assert profile[7] is True
+
+    trade_id = await db.create_trade(1, 2, "Widget")
+    await db.record_trade_rating(trade_id, 1, 2, 5, "seller")
+    await db.record_trade_review(trade_id, 1, 2, "Great buyer!")
+
+    reviews = await db.recent_reviews_for_user(2, 3)
+    assert reviews[0][0] == 1
+    assert "Great buyer" in reviews[0][1]
 
 
 async def test_quick_rating_cooldown(tmp_path: Path):
@@ -145,7 +168,7 @@ async def test_trade_flow(tmp_path: Path):
     duplicate = await db.record_trade_rating(trade_id, 5, 6, 4, "seller")
     assert duplicate is False
 
-    _, _, _, response_score, response_count = await db.profile(5)
+    _, _, _, response_score, response_count, *_ = await db.profile(5)
     assert response_count == 1
     assert 1 <= response_score <= 10
 
