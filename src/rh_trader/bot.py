@@ -202,6 +202,7 @@ class TraderBot(commands.Bot):
         self.tree.add_command(StockGroup(self.db))
         self.tree.add_command(TradeGroup(self.db))
         self.tree.add_command(WishlistGroup(self.db))
+        self.tree.add_command(AlertGroup(self.db, self._alert_limit))
         await self.add_misc_commands()
         await self.register_persistent_views()
         await self.tree.sync()
@@ -475,6 +476,16 @@ class TraderBot(commands.Bot):
 
         return best_tier
 
+    def _alert_limit(self, interaction: discord.Interaction) -> int:
+        tier = self._has_store_premium(interaction)
+        if tier is None:
+            return 2
+        if tier.rank == 1:
+            return 5
+        if tier.rank == 2:
+            return 10
+        return 20
+
     async def _handle_store_post(
         self, interaction: discord.Interaction, image: Optional[discord.Attachment]
     ) -> None:
@@ -557,6 +568,7 @@ class TraderBot(commands.Bot):
         )
         badge_url = PREMIUM_BADGE_URL if store_tier else None
         image_url = image.url if image else None
+        stock = await db.get_stock(interaction.user.id)
         embeds = await build_store_embeds(
             db,
             interaction.user.id,
@@ -634,6 +646,82 @@ class TraderBot(commands.Bot):
             is_premium=bool(store_tier),
             image_url=image_url,
         )
+        await self._send_alert_notifications(interaction.user, stock)
+
+    async def _send_alert_notifications(
+        self, poster: discord.abc.User | discord.Member, stock: list[Tuple[str, int]]
+    ) -> None:
+        items = [name for name, _ in stock]
+        matches = await self.db.matching_alerts_for_items(items)
+        aggregated: dict[int, list[Tuple[str, str]]] = {}
+
+        for user_id, alert_item, matched_item in matches:
+            if user_id == poster.id:
+                continue
+            aggregated.setdefault(user_id, []).append((alert_item, matched_item))
+
+        if not aggregated:
+            return
+
+        contact, score, count, response_score, response_count, _, _, stored_premium = (
+            await self.db.profile(poster.id)
+        )
+        trades = await self.db.trade_count(poster.id)
+        profile_lines = [
+            rating_summary(score, count),
+            response_summary(response_score, response_count),
+            f"🤝 {trades} trade{'s' if trades != 1 else ''} completed",
+        ]
+        if contact:
+            profile_lines.append(f"📞 Contact: {contact}")
+
+        premium_flag = bool(stored_premium)
+        color = PREMIUM_EMBED_COLOR if premium_flag else DEFAULT_EMBED_COLOR
+
+        for target_id, pairs in aggregated.items():
+            try:
+                target = self.get_user(target_id) or await self.fetch_user(target_id)
+            except discord.HTTPException:
+                _log.warning("Failed to load alert recipient %s", target_id)
+                continue
+
+            matched_lines = []
+            for alert_item, matched_item in pairs:
+                if alert_item.lower() == matched_item.lower():
+                    matched_lines.append(f"• **{matched_item}**")
+                else:
+                    matched_lines.append(
+                        f"• **{matched_item}** (matched alert: **{alert_item}** )"
+                    )
+            default_item = pairs[0][1]
+
+            embed = discord.Embed(
+                title="🔔 Item alert matched",
+                description=(
+                    f"<@{poster.id}> just posted a store with item(s) you're watching."
+                ),
+                color=color,
+            )
+            embed.add_field(
+                name="Matched items", value="\n".join(matched_lines), inline=False
+            )
+            embed.add_field(
+                name="Trader profile", value="\n".join(profile_lines), inline=False
+            )
+            embed.set_author(
+                name=getattr(poster, "display_name", str(poster)),
+                icon_url=getattr(poster.display_avatar, "url", None),
+            )
+
+            try:
+                await target.send(
+                    embed=embed,
+                    view=TradeAlertView(self.db, target.id, poster.id, default_item),
+                )
+            except discord.HTTPException:
+                _log.warning(
+                    "Failed to send alert notification for %s to %s", default_item, target_id
+                )
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot:
@@ -950,6 +1038,94 @@ class WishlistGroup(app_commands.Group):
         )
         await interaction.response.send_message(
             embed=info_embed("🧹 Wishlist cleanup", message),
+            ephemeral=True,
+        )
+
+
+class AlertGroup(app_commands.Group):
+    def __init__(self, db: Database, limit_resolver: Callable[[discord.Interaction], int]):
+        super().__init__(name="alerts", description="Get notified when items show up")
+        self.db = db
+        self._limit_resolver = limit_resolver
+
+    @app_commands.command(name="add", description="Add a new alert item")
+    @app_commands.describe(item="Item name to watch for")
+    async def add(self, interaction: discord.Interaction, item: str):
+        cleaned = item.strip()
+        if not cleaned:
+            await interaction.response.send_message(
+                embed=info_embed("⚠️ Item required", "Please enter an item name."),
+                ephemeral=True,
+            )
+            return
+
+        current_alerts = await self.db.get_alerts(interaction.user.id)
+        limit = self._limit_resolver(interaction)
+        if cleaned.lower() not in {entry.lower() for entry in current_alerts} and len(
+            current_alerts
+        ) >= limit:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "🚫 Alert limit reached",
+                    f"You can track up to **{limit}** item(s) with your current tier.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        await self.db.add_alert(interaction.user.id, cleaned)
+        await interaction.response.send_message(
+            embed=info_embed("🔔 Alert saved", f"I'll DM you when **{cleaned}** shows up."),
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="view", description="See your alert list")
+    async def view(self, interaction: discord.Interaction):
+        alerts = await self.db.get_alerts(interaction.user.id)
+        if not alerts:
+            await interaction.response.send_message(
+                embed=info_embed("🔔 Alerts", "You don't have any alerts yet."),
+                ephemeral=True,
+            )
+            return
+
+        description = "\n".join(f"• {entry}" for entry in alerts)
+        await interaction.response.send_message(
+            embed=info_embed("🔔 Alerts", description), ephemeral=True
+        )
+
+    @app_commands.command(name="remove", description="Delete an alert item")
+    @app_commands.describe(item="Item to remove (fuzzy matched against your alerts)")
+    async def remove(self, interaction: discord.Interaction, item: str):
+        alerts = await self.db.get_alerts(interaction.user.id)
+        if not alerts:
+            await interaction.response.send_message(
+                embed=info_embed("No alerts found", "Add an alert before removing one."),
+                ephemeral=True,
+            )
+            return
+
+        term = item.strip()
+        match = process.extractOne(term, alerts, scorer=fuzz.WRatio)
+        if not match or match[1] < 60:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "🔍 No close match",
+                    "I couldn't find anything that looks like that in your alerts.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        best_name = match[0]
+        removed = await self.db.remove_alert(interaction.user.id, best_name)
+        message = (
+            f"Removed **{best_name}** from your alerts."
+            if removed
+            else "Alert not found anymore."
+        )
+        await interaction.response.send_message(
+            embed=info_embed("🧹 Alerts updated", message),
             ephemeral=True,
         )
 
@@ -1421,6 +1597,52 @@ class TradeRequestModal(discord.ui.Modal):
         await start_trade_flow(
             interaction, self.db, interaction.user, self.partner, self.item_input.value
         )
+
+
+class TradeAlertView(discord.ui.View):
+    def __init__(self, db: Database, requester_id: int, partner_id: int, item: str):
+        super().__init__(timeout=600)
+        self.db = db
+        self.requester_id = requester_id
+        self.partner_id = partner_id
+        self.item = item
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "🚫 Not your alert", "Only the notified trader can use this button."
+                ),
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Start Trade", style=discord.ButtonStyle.primary, emoji="🤝")
+    async def start_trade(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if interaction.user.id == self.partner_id:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "⚠️ Invalid trade", "You cannot start a trade with yourself."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        try:
+            partner = interaction.client.get_user(self.partner_id) or await interaction.client.fetch_user(
+                self.partner_id
+            )
+        except discord.HTTPException:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "🚫 User unavailable", "I couldn't contact the trader. Please try again later."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        await start_trade_flow(interaction, self.db, interaction.user, partner, self.item)
 
 
 class ReviewModal(discord.ui.Modal):
