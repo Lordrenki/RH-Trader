@@ -32,7 +32,7 @@ DEFAULT_EMBED_COLOR = 0x2B2D31
 PREMIUM_EMBED_COLOR = 0xFFD700
 EMBED_FIELD_CHAR_LIMIT = 1000
 REVIEW_CHAR_LIMIT = 300
-TRADE_THREAD_CHANNEL_ID = 1_448_072_299_000_627_210
+TRADE_THREAD_CHANNEL_ID = 1_440_070_937_457_201_345
 PREMIUM_BADGE_URL = (
     "https://cdn.discordapp.com/attachments/1431560702518104175/1447739322022498364/"
     "discotools-xyz-icon.png?ex=6938b7d0&is=69376650&hm=bd0daea439bc5d7622d4b7008ba08ba8f5e44f30a79394a23dd58f5f5a07a3e6"
@@ -360,12 +360,12 @@ class TraderBot(commands.Bot):
         async def search(
             interaction: discord.Interaction, item: str, location: app_commands.Choice[str]
         ):
-            async def _filter_guild_members(entries: list[tuple[int, ...]]):
+            async def _resolve_guild_members(entries: list[tuple[int, ...]]):
                 guild = interaction.guild
                 if guild is None:
-                    return entries
+                    return []
 
-                filtered: list[tuple[int, ...]] = []
+                resolved: list[tuple[discord.Member, tuple[int, ...]]] = []
                 for entry in entries:
                     user_id = entry[0]
                     member = guild.get_member(user_id)
@@ -376,22 +376,42 @@ class TraderBot(commands.Bot):
                             member = None
 
                     if member is not None:
-                        filtered.append(entry)
+                        resolved.append((member, entry))
 
-                return filtered
+                return resolved
+
+            async def _store_post_link(member: discord.Member) -> str:
+                if interaction.guild is None:
+                    return ""
+
+                trade_post = await db.get_trade_post(interaction.guild.id, member.id)
+                if trade_post is None:
+                    return ""
+
+                channel_id, message_id, *_ = trade_post
+                url = f"https://discord.com/channels/{interaction.guild.id}/{channel_id}/{message_id}"
+                return f" · [Store post]({url})"
 
             if location.value == "wishlist":
                 results = await db.search_wishlist(item)
-                results = await _filter_guild_members(results)
+                results = await _resolve_guild_members(results)
                 description = "\n".join(
-                    f"🔍 <@{user_id}> wants **{item}**" + (f" — {note}" if note else "")
-                    for user_id, item, note in results
+                    (
+                        f"🔍 {member.display_name} wants **{item}**"
+                        + (f" — {note}" if note else "")
+                        + (await _store_post_link(member))
+                    )
+                    for member, (_, item, note) in results
                 ) or "No matching wishlist items found from members of this server."
             else:
                 results = await db.search_stock(item)
-                results = await _filter_guild_members(results)
+                results = await _resolve_guild_members(results)
                 description = "\n".join(
-                    f"🔍 <@{user_id}> has **{item}** (x{qty})" for user_id, item, qty in results
+                    (
+                        f"🔍 {member.display_name} has **{item}** (x{qty})"
+                        + (await _store_post_link(member))
+                    )
+                    for member, (_, item, qty) in results
                 ) or "No matching stock items found from members of this server."
 
             embed = info_embed("🔎 Search results", description)
