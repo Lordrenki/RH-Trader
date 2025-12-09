@@ -1543,7 +1543,7 @@ class StockAddModal(discord.ui.Modal):
             qty = 1
         qty = max(1, qty)
         item_name = self.item_input.value.strip()
-        await self._handler.add(interaction, item_name, qty)
+        await self._handler.add.callback(self._handler, interaction, item_name, qty)
 
 
 class WishlistAddModal(discord.ui.Modal):
@@ -1568,7 +1568,7 @@ class WishlistAddModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         item_name = self.item_input.value.strip()
         note = (self.note_input.value or "").strip()
-        await self._handler.add(interaction, item_name, note)
+        await self._handler.add.callback(self._handler, interaction, item_name, note)
 
 
 class RemoveStockModal(discord.ui.Modal):
@@ -1583,7 +1583,9 @@ class RemoveStockModal(discord.ui.Modal):
         self.add_item(self.item_input)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        await self._handler.remove(interaction, (self.item_input.value or "").strip())
+        await self._handler.remove.callback(
+            self._handler, interaction, (self.item_input.value or "").strip()
+        )
 
 
 class RemoveWishlistModal(discord.ui.Modal):
@@ -1598,7 +1600,9 @@ class RemoveWishlistModal(discord.ui.Modal):
         self.add_item(self.item_input)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        await self._handler.remove(interaction, (self.item_input.value or "").strip())
+        await self._handler.remove.callback(
+            self._handler, interaction, (self.item_input.value or "").strip()
+        )
 
 
 class AlertAddModal(discord.ui.Modal):
@@ -1613,7 +1617,7 @@ class AlertAddModal(discord.ui.Modal):
         self.add_item(self.item_input)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        await self._handler.add(interaction, self.item_input.value)
+        await self._handler.add.callback(self._handler, interaction, self.item_input.value)
 
 
 class AlertRemoveModal(discord.ui.Modal):
@@ -1628,7 +1632,7 @@ class AlertRemoveModal(discord.ui.Modal):
         self.add_item(self.item_input)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        await self._handler.remove(interaction, self.item_input.value)
+        await self._handler.remove.callback(self._handler, interaction, self.item_input.value)
 
 
 class BioModal(discord.ui.Modal):
