@@ -672,11 +672,15 @@ class TraderBot(commands.Bot):
             )
             return
 
+        failed_additions: list[int] = []
         for member in (seller, buyer):
             try:
                 await thread.add_user(member)
-            except discord.HTTPException:
-                _log.warning("Failed to add %s to trade thread %s", member.id, thread.id)
+            except discord.HTTPException as exc:
+                _log.warning(
+                    "Failed to add %s to trade thread %s: %s", member.id, thread.id, exc
+                )
+                failed_additions.append(member.id)
 
         trade_id = await self.db.create_trade(seller_id, buyer_id, item)
         await self.db.accept_trade(trade_id, seller_id)
@@ -702,11 +706,19 @@ class TraderBot(commands.Bot):
         except discord.HTTPException:
             _log.warning("Failed to send intro message to trade thread %s", thread.id)
 
+        description = (
+            f"I've opened {thread.mention} for you. I'll clean it up when the trade is closed."
+        )
+        if failed_additions:
+            users = ", ".join(f"<@{member_id}>" for member_id in failed_additions)
+            description += (
+                "\n⚠️ I couldn't add "
+                f"{users} to the thread. Make sure they can view {channel.mention} "
+                "and that I have permission to manage private threads there."
+            )
+
         await interaction.response.send_message(
-            embed=info_embed(
-                "✅ Trade thread ready",
-                f"I've opened {thread.mention} for you. I'll clean it up when the trade is closed.",
-            ),
+            embed=info_embed("✅ Trade thread ready", description),
             ephemeral=True,
         )
 
@@ -1799,15 +1811,22 @@ class TradeThreadView(BasePersistentView):
 
         try:
             if isinstance(interaction.channel, discord.Thread):
+                guild = interaction.guild
                 for user_id in (self.seller_id, self.buyer_id):
+                    member = guild.get_member(user_id) if guild else None
+                    target = member or discord.Object(id=user_id)
                     try:
-                        await interaction.channel.remove_user(user_id)
+                        await interaction.channel.remove_user(target)
                     except discord.HTTPException:
                         _log.warning(
                             "Failed to remove %s from trade thread %s", user_id, interaction.channel.id
                         )
                 try:
                     await interaction.channel.edit(archived=True, locked=True)
+                except discord.HTTPException:
+                    pass
+                try:
+                    await interaction.channel.delete(reason="Trade closed")
                 except discord.HTTPException:
                     pass
         finally:
