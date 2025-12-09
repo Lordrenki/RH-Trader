@@ -82,6 +82,45 @@ def _format_duration(seconds: int) -> str:
     return f"{secs} second(s)"
 
 
+def _summary_with_optional_boost_text(
+    summary_fn: Callable[..., str],
+    score: float,
+    count: int,
+    *,
+    premium_boost: bool,
+    show_premium_boost_text: bool,
+    boost_percent: float | None = None,
+) -> str:
+    """Call a summary function, gracefully handling legacy signatures.
+
+    Older deployments may use ``rating_summary``/``response_summary`` definitions
+    that do not accept the ``show_premium_boost_text`` keyword. This helper tries
+    the modern signature first and falls back to stripping the premium suffix
+    from legacy outputs when the keyword is unsupported.
+    """
+
+    kwargs: dict[str, float] = {}
+    if boost_percent is not None:
+        kwargs["boost_percent"] = boost_percent
+
+    try:
+        return summary_fn(
+            score,
+            count,
+            premium_boost=premium_boost,
+            show_premium_boost_text=show_premium_boost_text,
+            **kwargs,
+        )
+    except TypeError as exc:
+        if "show_premium_boost_text" not in str(exc):
+            raise
+
+    text = summary_fn(score, count, premium_boost=premium_boost, **kwargs)
+    if not show_premium_boost_text and text.endswith(" (Premium boost)"):
+        return text.removesuffix(" (Premium boost)")
+    return text
+
+
 def _can_view_other(interaction: discord.Interaction, target: discord.User | discord.Member) -> bool:
     # Allow anyone to view another member's data.
     return True
@@ -177,13 +216,15 @@ async def build_store_embeds(
 
     embeds: list[discord.Embed] = []
     premium_flag = is_premium or bool(stored_premium)
-    rating_line = rating_summary(
+    rating_line = _summary_with_optional_boost_text(
+        rating_summary,
         score,
         count,
         premium_boost=premium_flag,
         show_premium_boost_text=False,
     )
-    response_line = response_summary(
+    response_line = _summary_with_optional_boost_text(
+        response_summary,
         response_score,
         response_count,
         premium_boost=premium_flag,
@@ -415,14 +456,16 @@ class TraderBot(commands.Bot):
 
             trade_label = "trade" if trades == 1 else "trades"
             description_lines = [
-                rating_summary(
+                _summary_with_optional_boost_text(
+                    rating_summary,
                     score,
                     count,
                     premium_boost=premium_flag,
                     show_premium_boost_text=False,
                 ),
                 f"🤝 {trades} {trade_label} completed",
-                response_summary(
+                _summary_with_optional_boost_text(
+                    response_summary,
                     response_score,
                     response_count,
                     premium_boost=premium_flag,
