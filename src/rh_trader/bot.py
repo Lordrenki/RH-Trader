@@ -191,6 +191,9 @@ class TraderBot(commands.Bot):
     ) -> None:
         intents = discord.Intents.default()
         intents.members = True
+        # Enable privileged intent to avoid missing intent warnings and allow
+        # message content when needed for context-aware features.
+        intents.message_content = True
         super().__init__(command_prefix=commands.when_mentioned_or("!"), intents=intents)
         self.settings = settings
         self.db = db
