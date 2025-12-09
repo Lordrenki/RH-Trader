@@ -150,6 +150,23 @@ async def test_trade_flow(tmp_path: Path):
     assert 1 <= response_score <= 10
 
 
+async def test_trade_reviews(tmp_path: Path):
+    db = await init_db(tmp_path)
+    trade_id = await db.create_trade(5, 6, "Rare Item")
+
+    # Reviews require a prior rating
+    unsaved = await db.record_trade_review(trade_id, 5, 6, "Great trade!")
+    assert unsaved is False
+
+    await db.record_trade_rating(trade_id, 5, 6, 5, "seller")
+    saved = await db.record_trade_review(trade_id, 5, 6, "Great trade!")
+    assert saved is True
+
+    reviewer_id, review_text, _ = await db.latest_review_for_user(6)
+    assert reviewer_id == 5
+    assert "Great trade" in review_text
+
+
 async def test_trade_channel_settings(tmp_path: Path):
     db = await init_db(tmp_path)
 
