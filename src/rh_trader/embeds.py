@@ -44,3 +44,9 @@ def rating_summary(score: float, count: int) -> str:
     if count == 0:
         return "No ratings yet"
     return f"⭐ {score:.2f} average from {count} ratings"
+
+
+def response_summary(score: float, count: int) -> str:
+    if count == 0:
+        return "⚡ No response data yet"
+    return f"⚡ {score:.1f}/10 response speed across {count} trades"

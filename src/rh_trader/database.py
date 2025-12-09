@@ -26,7 +26,9 @@ class Database:
                     user_id INTEGER PRIMARY KEY,
                     contact TEXT DEFAULT '',
                     rating_total INTEGER DEFAULT 0,
-                    rating_count INTEGER DEFAULT 0
+                    rating_count INTEGER DEFAULT 0,
+                    response_total INTEGER DEFAULT 0,
+                    response_count INTEGER DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS inventories (
@@ -66,7 +68,11 @@ class Database:
                     item TEXT NOT NULL,
                     status TEXT DEFAULT 'open',
                     seller_id INTEGER,
-                    buyer_id INTEGER
+                    buyer_id INTEGER,
+                    created_at INTEGER DEFAULT 0,
+                    accepted_at INTEGER,
+                    closed_at INTEGER,
+                    response_recorded INTEGER DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS trade_feedback (
@@ -98,6 +104,10 @@ class Database:
                     user_id INTEGER NOT NULL,
                     channel_id INTEGER NOT NULL,
                     message_id INTEGER NOT NULL,
+                    listing_limit INTEGER DEFAULT 0,
+                    store_tier_name TEXT DEFAULT '',
+                    is_premium INTEGER DEFAULT 0,
+                    image_url TEXT DEFAULT '',
                     PRIMARY KEY (guild_id, user_id)
                 );
 
@@ -117,6 +127,8 @@ class Database:
             )
             await db.commit()
             await self._ensure_trade_columns(db)
+            await self._ensure_user_columns(db)
+            await self._ensure_trade_post_columns(db)
 
     def _connect(self) -> aiosqlite.Connection:
         return aiosqlite.connect(self.path)
@@ -129,6 +141,38 @@ class Database:
             await db.execute("ALTER TABLE trades ADD COLUMN seller_id INTEGER")
         if "buyer_id" not in columns:
             await db.execute("ALTER TABLE trades ADD COLUMN buyer_id INTEGER")
+        if "created_at" not in columns:
+            await db.execute("ALTER TABLE trades ADD COLUMN created_at INTEGER DEFAULT 0")
+        if "accepted_at" not in columns:
+            await db.execute("ALTER TABLE trades ADD COLUMN accepted_at INTEGER")
+        if "closed_at" not in columns:
+            await db.execute("ALTER TABLE trades ADD COLUMN closed_at INTEGER")
+        if "response_recorded" not in columns:
+            await db.execute(
+                "ALTER TABLE trades ADD COLUMN response_recorded INTEGER DEFAULT 0"
+            )
+        await db.commit()
+
+    async def _ensure_user_columns(self, db: aiosqlite.Connection) -> None:
+        cursor = await db.execute("PRAGMA table_info(users)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        if "response_total" not in columns:
+            await db.execute("ALTER TABLE users ADD COLUMN response_total INTEGER DEFAULT 0")
+        if "response_count" not in columns:
+            await db.execute("ALTER TABLE users ADD COLUMN response_count INTEGER DEFAULT 0")
+        await db.commit()
+
+    async def _ensure_trade_post_columns(self, db: aiosqlite.Connection) -> None:
+        cursor = await db.execute("PRAGMA table_info(trade_posts)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        if "listing_limit" not in columns:
+            await db.execute("ALTER TABLE trade_posts ADD COLUMN listing_limit INTEGER DEFAULT 0")
+        if "store_tier_name" not in columns:
+            await db.execute("ALTER TABLE trade_posts ADD COLUMN store_tier_name TEXT DEFAULT ''")
+        if "is_premium" not in columns:
+            await db.execute("ALTER TABLE trade_posts ADD COLUMN is_premium INTEGER DEFAULT 0")
+        if "image_url" not in columns:
+            await db.execute("ALTER TABLE trade_posts ADD COLUMN image_url TEXT DEFAULT ''")
         await db.commit()
 
     async def ensure_user(self, user_id: int) -> None:
@@ -378,15 +422,88 @@ class Database:
                 await db.commit()
         return True, None
 
+    def _score_time_window(self, seconds: int) -> int:
+        """Convert a response time window into a 1-10 score."""
+
+        if seconds <= 60 * 60:
+            return 10
+        if seconds <= 3 * 60 * 60:
+            return 9
+        if seconds <= 6 * 60 * 60:
+            return 8
+        if seconds <= 12 * 60 * 60:
+            return 7
+        if seconds <= 24 * 60 * 60:
+            return 6
+        if seconds <= 48 * 60 * 60:
+            return 4
+        if seconds <= 72 * 60 * 60:
+            return 3
+        if seconds <= 96 * 60 * 60:
+            return 2
+        return 1
+
+    def _response_score(self, created_at: int, accepted_at: int | None, closed_at: int | None) -> int:
+        base_start = created_at or int(time.time())
+        end_time = closed_at or accepted_at or base_start
+        accept_time = accepted_at or end_time
+
+        response_seconds = max(0, accept_time - base_start)
+        completion_seconds = max(0, end_time - accept_time)
+        accept_score = self._score_time_window(response_seconds)
+        completion_score = self._score_time_window(completion_seconds)
+        return max(1, round((accept_score + completion_score) / 2))
+
+    async def _record_response_for_trade(self, db: aiosqlite.Connection, trade_id: int) -> None:
+        cursor = await db.execute(
+            "SELECT seller_id, buyer_id, created_at, accepted_at, closed_at, response_recorded\n"
+            "FROM trades WHERE id = ?",
+            (trade_id,),
+        )
+        row = await cursor.fetchone()
+        if not row:
+            return
+
+        seller_id, buyer_id, created_at, accepted_at, closed_at, recorded = row
+        if recorded:
+            return
+
+        created_at = created_at or int(time.time())
+        closed_at = closed_at or int(time.time())
+        score = self._response_score(created_at, accepted_at, closed_at)
+        for user_id in (seller_id, buyer_id):
+            await db.execute(
+                "INSERT OR IGNORE INTO users(user_id) VALUES (?)",
+                (user_id,),
+            )
+            await db.execute(
+                "UPDATE users SET response_total = response_total + ?, response_count = response_count + 1\n"
+                "WHERE user_id = ?",
+                (score, user_id),
+            )
+
+        await db.execute(
+            "UPDATE trades SET response_recorded = 1 WHERE id = ?",
+            (trade_id,),
+        )
+
     async def create_trade(self, seller_id: int, buyer_id: int, item: str) -> int:
         await self.ensure_user(seller_id)
         await self.ensure_user(buyer_id)
         async with self._lock:
             async with self._connect() as db:
+                now_ts = int(time.time())
                 cursor = await db.execute(
-                    "INSERT INTO trades(user_id, partner_id, item, status, seller_id, buyer_id)\n"
-                    "VALUES (?, ?, ?, 'pending', ?, ?)",
-                    (seller_id, buyer_id, item.strip(), seller_id, buyer_id),
+                    "INSERT INTO trades(user_id, partner_id, item, status, seller_id, buyer_id, created_at)\n"
+                    "VALUES (?, ?, ?, 'pending', ?, ?, ?)",
+                    (
+                        seller_id,
+                        buyer_id,
+                        item.strip(),
+                        seller_id,
+                        buyer_id,
+                        now_ts,
+                    ),
                 )
                 await db.commit()
                 return cursor.lastrowid
@@ -397,8 +514,9 @@ class Database:
         async with self._lock:
             async with self._connect() as db:
                 cursor = await db.execute(
-                    "UPDATE trades SET status = 'open' WHERE id = ? AND seller_id = ? AND status = 'pending'",
-                    (trade_id, seller_id),
+                    "UPDATE trades SET status = 'open', accepted_at = COALESCE(accepted_at, ?)\n"
+                    "WHERE id = ? AND seller_id = ? AND status = 'pending'",
+                    (int(time.time()), trade_id, seller_id),
                 )
                 await db.commit()
                 return cursor.rowcount > 0
@@ -409,9 +527,12 @@ class Database:
         async with self._lock:
             async with self._connect() as db:
                 cursor = await db.execute(
-                    "UPDATE trades SET status = 'rejected' WHERE id = ? AND seller_id = ? AND status = 'pending'",
-                    (trade_id, seller_id),
+                    "UPDATE trades SET status = 'rejected', closed_at = COALESCE(closed_at, ?)\n"
+                    "WHERE id = ? AND seller_id = ? AND status = 'pending'",
+                    (int(time.time()), trade_id, seller_id),
                 )
+                if cursor.rowcount:
+                    await self._record_response_for_trade(db, trade_id)
                 await db.commit()
                 return cursor.rowcount > 0
 
@@ -459,9 +580,12 @@ class Database:
         async with self._lock:
             async with self._connect() as db:
                 cursor = await db.execute(
-                    "UPDATE trades SET status = 'completed' WHERE id = ? AND status = 'open'",
-                    (trade_id,),
+                    "UPDATE trades SET status = 'completed', closed_at = COALESCE(closed_at, ?)\n"
+                    "WHERE id = ? AND status = 'open'",
+                    (int(time.time()), trade_id),
                 )
+                if cursor.rowcount:
+                    await self._record_response_for_trade(db, trade_id)
                 await db.commit()
                 return cursor.rowcount > 0
 
@@ -469,9 +593,12 @@ class Database:
         async with self._lock:
             async with self._connect() as db:
                 cursor = await db.execute(
-                    "UPDATE trades SET status = 'cancelled' WHERE id = ? AND status IN ('open', 'pending')",
-                    (trade_id,),
+                    "UPDATE trades SET status = 'cancelled', closed_at = COALESCE(closed_at, ?)\n"
+                    "WHERE id = ? AND status IN ('open', 'pending')",
+                    (int(time.time()), trade_id),
                 )
+                if cursor.rowcount:
+                    await self._record_response_for_trade(db, trade_id)
                 await db.commit()
                 return cursor.rowcount > 0
 
@@ -572,16 +699,34 @@ class Database:
             async with self._connect() as db:
                 if create_if_missing:
                     user_id, partner_id, item = create_if_missing
+                    now_ts = int(time.time())
                     await db.execute(
-                        "INSERT INTO trades(id, user_id, partner_id, item, status, seller_id, buyer_id) VALUES (?, ?, ?, ?, ?, ?, ?)\n"
+                        "INSERT INTO trades(id, user_id, partner_id, item, status, seller_id, buyer_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)\n"
                         "ON CONFLICT(id) DO UPDATE SET status = excluded.status",
-                        (trade_id, user_id, partner_id, item, status, user_id, partner_id),
+                        (
+                            trade_id,
+                            user_id,
+                            partner_id,
+                            item,
+                            status,
+                            user_id,
+                            partner_id,
+                            now_ts,
+                        ),
                     )
                 else:
-                    await db.execute(
-                        "UPDATE trades SET status = ? WHERE id = ?",
-                        (status, trade_id),
-                    )
+                    now_ts = int(time.time())
+                    if status in {"completed", "cancelled", "rejected"}:
+                        await db.execute(
+                            "UPDATE trades SET status = ?, closed_at = COALESCE(closed_at, ?) WHERE id = ?",
+                            (status, now_ts, trade_id),
+                        )
+                        await self._record_response_for_trade(db, trade_id)
+                    else:
+                        await db.execute(
+                            "UPDATE trades SET status = ? WHERE id = ?",
+                            (status, trade_id),
+                        )
                 await db.commit()
 
     async def leaderboard(self, limit: int = 10) -> List[Tuple[int, float, int]]:
@@ -595,16 +740,19 @@ class Database:
             )
             return await cursor.fetchall()
 
-    async def profile(self, user_id: int) -> Tuple[str, float, int]:
+    async def profile(self, user_id: int) -> Tuple[str, float, int, float, int]:
         async with self._connect() as db:
             cursor = await db.execute(
                 "SELECT contact,\n"
                 "CASE WHEN rating_count = 0 THEN 0 ELSE CAST(rating_total AS FLOAT) / rating_count END AS score,\n"
-                "rating_count FROM users WHERE user_id = ?",
+                "rating_count,\n"
+                "CASE WHEN response_count = 0 THEN 0 ELSE CAST(response_total AS FLOAT) / response_count END AS response_score,\n"
+                "response_count\n"
+                "FROM users WHERE user_id = ?",
                 (user_id,),
             )
             row = await cursor.fetchone()
-            return row or ("", 0.0, 0)
+            return row or ("", 0.0, 0, 0.0, 0)
 
     async def trade_count(self, user_id: int) -> int:
         async with self._connect() as db:
@@ -623,10 +771,10 @@ class Database:
                 await db.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
                 await db.commit()
 
-    async def list_trade_posts(self) -> List[Tuple[int, int, int, int]]:
+    async def list_trade_posts(self) -> List[Tuple[int, int, int, int, int, str, int, str]]:
         async with self._connect() as db:
             cursor = await db.execute(
-                "SELECT guild_id, user_id, channel_id, message_id FROM trade_posts"
+                "SELECT guild_id, user_id, channel_id, message_id, listing_limit, store_tier_name, is_premium, image_url FROM trade_posts"
             )
             return await cursor.fetchall()
 
@@ -666,21 +814,44 @@ class Database:
                 )
                 await db.commit()
 
-    async def get_trade_post(self, guild_id: int, user_id: int) -> Tuple[int, int] | None:
+    async def get_trade_post(
+        self, guild_id: int, user_id: int
+    ) -> Tuple[int, int, int, str, int, str] | None:
         async with self._connect() as db:
             cursor = await db.execute(
-                "SELECT channel_id, message_id FROM trade_posts WHERE guild_id = ? AND user_id = ?",
+                "SELECT channel_id, message_id, listing_limit, store_tier_name, is_premium, image_url\n"
+                "FROM trade_posts WHERE guild_id = ? AND user_id = ?",
                 (guild_id, user_id),
             )
             return await cursor.fetchone()
 
-    async def save_trade_post(self, guild_id: int, user_id: int, channel_id: int, message_id: int) -> None:
+    async def save_trade_post(
+        self,
+        guild_id: int,
+        user_id: int,
+        channel_id: int,
+        message_id: int,
+        *,
+        listing_limit: int = 0,
+        store_tier_name: str | None = None,
+        is_premium: bool = False,
+        image_url: str | None = None,
+    ) -> None:
         async with self._lock:
             async with self._connect() as db:
                 await db.execute(
-                    "INSERT INTO trade_posts(guild_id, user_id, channel_id, message_id) VALUES (?, ?, ?, ?)\n"
-                    "ON CONFLICT(guild_id, user_id) DO UPDATE SET channel_id = excluded.channel_id, message_id = excluded.message_id",
-                    (guild_id, user_id, channel_id, message_id),
+                    "INSERT INTO trade_posts(guild_id, user_id, channel_id, message_id, listing_limit, store_tier_name, is_premium, image_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)\n"
+                    "ON CONFLICT(guild_id, user_id) DO UPDATE SET channel_id = excluded.channel_id, message_id = excluded.message_id, listing_limit = excluded.listing_limit, store_tier_name = excluded.store_tier_name, is_premium = excluded.is_premium, image_url = excluded.image_url",
+                    (
+                        guild_id,
+                        user_id,
+                        channel_id,
+                        message_id,
+                        listing_limit,
+                        store_tier_name or "",
+                        int(is_premium),
+                        image_url or "",
+                    ),
                 )
                 await db.commit()
 

@@ -15,13 +15,26 @@ from rapidfuzz import fuzz, process
 from .catalog import CatalogClient
 from .config import Settings, load_settings
 from .database import Database
-from .embeds import format_stock, format_wishlist, info_embed, rating_summary
+from .embeds import (
+    format_stock,
+    format_wishlist,
+    info_embed,
+    rating_summary,
+    response_summary,
+)
 
 _log = logging.getLogger(__name__)
 QUICK_RATING_COOLDOWN_SECONDS = 24 * 60 * 60
 STORE_POST_WINDOW_SECONDS = 60 * 60
 DEFAULT_STORE_POST_LIMIT = 1
 DEFAULT_STORE_LISTING_LIMIT = 10
+DEFAULT_EMBED_COLOR = 0x2B2D31
+PREMIUM_EMBED_COLOR = 0xFFD700
+EMBED_FIELD_CHAR_LIMIT = 1000
+PREMIUM_BADGE_URL = (
+    "https://cdn.discordapp.com/attachments/1431560702518104175/1447739322022498364/"
+    "discotools-xyz-icon.png?ex=6938b7d0&is=69376650&hm=bd0daea439bc5d7622d4b7008ba08ba8f5e44f30a79394a23dd58f5f5a07a3e6"
+)
 
 
 @dataclass(frozen=True)
@@ -72,6 +85,88 @@ def _can_view_other(interaction: discord.Interaction, target: discord.User | dis
     return True
 
 
+def _paginate_field_entries(entries: list, formatter, per_page: int) -> list[str]:
+    """Split entries into field-friendly pages respecting Discord limits."""
+
+    if not entries:
+        return [formatter([])]
+
+    chunk_size = max(1, per_page)
+    pages: list[str] = []
+    start = 0
+    while start < len(entries):
+        end = min(start + chunk_size, len(entries))
+        while end > start:
+            formatted = formatter(entries[start:end])
+            if len(formatted) <= EMBED_FIELD_CHAR_LIMIT or end - start == 1:
+                pages.append(formatted)
+                start = end
+                break
+            end -= 1
+    return pages
+
+
+async def build_store_embeds(
+    db: Database,
+    user_id: int,
+    display_name: str,
+    *,
+    avatar_url: str | None,
+    listing_limit: int,
+    store_tier_name: str | None,
+    is_premium: bool,
+    badge_url: str | None,
+    image_url: str | None,
+) -> list[discord.Embed]:
+    contact, score, count, response_score, response_count = await db.profile(user_id)
+    stock = await db.get_stock(user_id)
+    wishlist = await db.get_wishlist(user_id)
+
+    listing_limit = max(1, listing_limit)
+    stock_pages = _paginate_field_entries(stock, format_stock, listing_limit)
+    wishlist_pages = _paginate_field_entries(wishlist, format_wishlist, listing_limit)
+    total_pages = max(len(stock_pages), len(wishlist_pages), 1)
+
+    embeds: list[discord.Embed] = []
+    rating_line = rating_summary(score, count)
+    response_line = response_summary(response_score, response_count)
+    descriptor_lines = [f"{rating_line} • {response_line}"]
+    if store_tier_name:
+        descriptor_lines.append(f"🏅 {store_tier_name}")
+    if contact:
+        descriptor_lines.append(f"📞 Contact: {contact}")
+
+    color = PREMIUM_EMBED_COLOR if is_premium else DEFAULT_EMBED_COLOR
+    author_label = (
+        f"{display_name} • {store_tier_name}" if store_tier_name else display_name
+    )
+
+    for idx in range(total_pages):
+        stock_value = stock_pages[idx] if idx < len(stock_pages) else format_stock([])
+        wishlist_value = (
+            wishlist_pages[idx] if idx < len(wishlist_pages) else format_wishlist([])
+        )
+        embed = discord.Embed(
+            title=f"🛒 {display_name}'s Store",
+            description="\n".join(descriptor_lines),
+            color=color,
+        )
+        if avatar_url:
+            embed.set_author(name=author_label, icon_url=avatar_url)
+        else:
+            embed.set_author(name=author_label)
+        if badge_url:
+            embed.set_thumbnail(url=badge_url)
+        embed.add_field(name="Inventory", value=stock_value, inline=False)
+        embed.add_field(name="Wishlist", value=wishlist_value, inline=False)
+        if image_url:
+            embed.set_image(url=image_url)
+        embed.set_footer(text="RH-Trader • Made with ♡ by Kuro")
+        embeds.append(embed)
+
+    return embeds
+
+
 class TraderBot(commands.Bot):
     """Discord bot that exposes trading slash commands."""
 
@@ -100,8 +195,38 @@ class TraderBot(commands.Bot):
         _log.info("Slash commands synced")
 
     async def register_persistent_views(self) -> None:
-        for _, user_id, _, _ in await self.db.list_trade_posts():
-            self.add_view(StorePostView(self.db, user_id))
+        for _, user_id, _, _, listing_limit, tier_name, is_premium, image_url in await self.db.list_trade_posts():
+            try:
+                user = self.get_user(user_id) or await self.fetch_user(user_id)
+                display_name = user.display_name
+                avatar_url = user.display_avatar.url
+            except discord.HTTPException:
+                display_name = f"User {user_id}"
+                avatar_url = None
+
+            embeds = await build_store_embeds(
+                self.db,
+                user_id,
+                display_name,
+                avatar_url=avatar_url,
+                listing_limit=listing_limit or DEFAULT_STORE_LISTING_LIMIT,
+                store_tier_name=tier_name or None,
+                is_premium=bool(is_premium),
+                badge_url=PREMIUM_BADGE_URL if is_premium else None,
+                image_url=image_url or None,
+            )
+
+            view = StorePostView(
+                self.db,
+                user_id,
+                listing_limit=listing_limit or DEFAULT_STORE_LISTING_LIMIT,
+                store_tier_name=tier_name or None,
+                is_premium=bool(is_premium),
+                badge_url=PREMIUM_BADGE_URL if is_premium else None,
+                image_url=image_url or None,
+            )
+            view.set_page_count(len(embeds))
+            self.add_view(view)
 
         for trade_id, seller_id, buyer_id, item, status in await self.db.list_trades_by_status(
             {"pending", "open"}
@@ -221,12 +346,14 @@ class TraderBot(commands.Bot):
                 )
                 return
 
-            _, score, count = await db.profile(target.id)
+            _, score, count, response_score, response_count = await db.profile(target.id)
             stock = await db.get_stock(target.id)
             wishlist = await db.get_wishlist(target.id)
             embed = info_embed(
                 f"🧾 Profile for {target.display_name}",
-                description=rating_summary(score, count),
+                description="\n".join(
+                    [rating_summary(score, count), response_summary(response_score, response_count)]
+                ),
             )
             embed.add_field(name="Inventory", value=format_stock(stock), inline=False)
             embed.add_field(name="Wishlist", value=format_wishlist(wishlist), inline=False)
@@ -371,48 +498,37 @@ class TraderBot(commands.Bot):
             )
             return
 
-        contact, score, count = await db.profile(interaction.user.id)
-        stock = await db.get_stock(interaction.user.id)
-        wishlist = await db.get_wishlist(interaction.user.id)
-
         listing_limit = (
             store_tier.listing_limit if store_tier else DEFAULT_STORE_LISTING_LIMIT
         )
-        stock_display = stock[:listing_limit]
-        wishlist_display = wishlist[:listing_limit]
-
-        description_lines = [rating_summary(score, count)]
-        if contact:
-            description_lines.append(f"📞 Contact: {contact}")
-        description_lines.append(
-            "Press **Start Trade** below or use `/trade start` to begin a DM with this trader."
+        badge_url = PREMIUM_BADGE_URL if store_tier else None
+        image_url = image.url if image else None
+        embeds = await build_store_embeds(
+            db,
+            interaction.user.id,
+            interaction.user.display_name,
+            avatar_url=interaction.user.display_avatar.url,
+            listing_limit=listing_limit,
+            store_tier_name=store_tier.name if store_tier else None,
+            is_premium=bool(store_tier),
+            badge_url=badge_url,
+            image_url=image_url,
         )
-        embed = info_embed(
-            f"🛒 Store post from {interaction.user.display_name}",
-            "\n".join(description_lines),
+
+        view = StorePostView(
+            db,
+            interaction.user.id,
+            interaction.user.display_name,
+            listing_limit=listing_limit,
+            store_tier_name=store_tier.name if store_tier else None,
+            is_premium=bool(store_tier),
+            badge_url=badge_url,
+            image_url=image_url,
         )
-        embed.set_author(
-            name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url
-        )
-        stock_value = format_stock(stock_display)
-        if len(stock) > listing_limit:
-            stock_value += f"\n… {len(stock) - listing_limit} more item(s) not shown."
-
-        wishlist_value = format_wishlist(wishlist_display)
-        if len(wishlist) > listing_limit:
-            wishlist_value += (
-                f"\n… {len(wishlist) - listing_limit} more wishlist item(s) not shown."
-            )
-
-        embed.add_field(name="Inventory", value=stock_value, inline=False)
-        embed.add_field(name="Wishlist", value=wishlist_value, inline=False)
-        if image:
-            embed.set_image(url=image.url)
-
-        view = StorePostView(db, interaction.user.id, interaction.user.display_name)
+        view.set_page_count(len(embeds))
         previous_post = await db.get_trade_post(interaction.guild.id, interaction.user.id)
         if previous_post:
-            prev_channel_id, prev_message_id = previous_post
+            prev_channel_id, prev_message_id, *_ = previous_post
             prev_channel = interaction.client.get_channel(prev_channel_id)
             if prev_channel is None:
                 try:
@@ -432,10 +548,10 @@ class TraderBot(commands.Bot):
                         prev_message_id,
                         interaction.user.id,
                         interaction.guild.id,
-                    )
+            )
 
         try:
-            message = await channel.send(embed=embed, view=view)
+            message = await channel.send(embed=embeds[0], view=view)
         except discord.HTTPException:
             await interaction.response.send_message(
                 embed=info_embed(
@@ -455,7 +571,14 @@ class TraderBot(commands.Bot):
             ephemeral=True,
         )
         await db.save_trade_post(
-            interaction.guild.id, interaction.user.id, channel.id, message.id
+            interaction.guild.id,
+            interaction.user.id,
+            channel.id,
+            message.id,
+            listing_limit=listing_limit,
+            store_tier_name=store_tier.name if store_tier else None,
+            is_premium=bool(store_tier),
+            image_url=image_url,
         )
 
     async def on_message(self, message: discord.Message) -> None:
@@ -678,13 +801,16 @@ class TradeGroup(app_commands.Group):
             )
             return
 
-        _, avg_score, rating_count = await self.db.profile(partner.id)
+        _, avg_score, rating_count, response_score, response_count = await self.db.profile(
+            partner.id
+        )
         await interaction.response.send_message(
             embed=info_embed(
                 "⭐ Kudos sent",
                 (
                     f"You rated {partner.mention} {score} star(s).\n"
                     f"Their profile now shows: {rating_summary(avg_score, rating_count)}"
+                    f" • {response_summary(response_score, response_count)}"
                 ),
             ),
             ephemeral=True,
@@ -1078,11 +1204,14 @@ async def send_trade_invites(
             is_seller = user_id == seller_id
             stats_line = ""
             if is_seller and status == "pending":
-                _, score, rating_count = await db.profile(partner_id)
+                _, score, rating_count, response_score, response_count = await db.profile(
+                    partner_id
+                )
                 trades = await db.trade_count(partner_id)
                 trade_label = "trade" if trades == 1 else "trades"
                 stats_line = (
                     f"\nTrader stats for <@{partner_id}>: {rating_summary(score, rating_count)}"
+                    f" • {response_summary(response_score, response_count)}"
                     f" • {trades} {trade_label} completed."
                 )
             pending_note = (
@@ -1219,12 +1348,74 @@ class TradeRequestModal(discord.ui.Modal):
 
 
 class StorePostView(BasePersistentView):
-    def __init__(self, db: Database, poster_id: int, poster_name: str | None = None):
+    def __init__(
+        self,
+        db: Database,
+        poster_id: int,
+        poster_name: str | None = None,
+        *,
+        listing_limit: int = DEFAULT_STORE_LISTING_LIMIT,
+        store_tier_name: str | None = None,
+        is_premium: bool = False,
+        badge_url: str | None = None,
+        image_url: str | None = None,
+    ):
         super().__init__()
         self.db = db
         self.poster_id = poster_id
         self.poster_name = poster_name or ""
+        self.listing_limit = listing_limit or DEFAULT_STORE_LISTING_LIMIT
+        self.store_tier_name = store_tier_name or None
+        self.is_premium = is_premium
+        self.badge_url = badge_url
+        self.image_url = image_url
+        self.current_page = 0
+        self.page_count = 1
         self.start_trade.custom_id = f"store:start:{poster_id}"
+        self.previous_page.custom_id = f"store:page:{poster_id}:prev"
+        self.next_page.custom_id = f"store:page:{poster_id}:next"
+        self._sync_nav_buttons()
+
+    def set_page_count(self, count: int) -> None:
+        self.page_count = max(1, count)
+        self._sync_nav_buttons()
+
+    def _sync_nav_buttons(self) -> None:
+        disable_nav = self.page_count <= 1
+        self.previous_page.disabled = disable_nav
+        self.next_page.disabled = disable_nav
+
+    async def _load_pages(self, interaction: discord.Interaction) -> list[discord.Embed]:
+        try:
+            user = interaction.client.get_user(self.poster_id) or await interaction.client.fetch_user(
+                self.poster_id
+            )
+            avatar_url = user.display_avatar.url
+            display_name = user.display_name
+        except discord.HTTPException:
+            avatar_url = None
+            display_name = self.poster_name or f"User {self.poster_id}"
+
+        embeds = await build_store_embeds(
+            self.db,
+            self.poster_id,
+            display_name,
+            avatar_url=avatar_url,
+            listing_limit=self.listing_limit,
+            store_tier_name=self.store_tier_name,
+            is_premium=self.is_premium,
+            badge_url=self.badge_url,
+            image_url=self.image_url,
+        )
+        self.set_page_count(len(embeds))
+        return embeds
+
+    async def _change_page(self, interaction: discord.Interaction, delta: int) -> None:
+        embeds = await self._load_pages(interaction)
+        total = len(embeds) or 1
+        self.current_page = (self.current_page + delta) % total
+        self._sync_nav_buttons()
+        await interaction.response.edit_message(embed=embeds[self.current_page], view=self)
 
     @discord.ui.button(label="Start Trade", style=discord.ButtonStyle.primary, emoji="🤝")
     async def start_trade(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -1250,6 +1441,20 @@ class StorePostView(BasePersistentView):
             return
 
         await interaction.response.send_modal(TradeRequestModal(self.db, partner))
+
+    @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary)
+    async def previous_page(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if self.page_count <= 1:
+            await interaction.response.defer(ephemeral=True)
+            return
+        await self._change_page(interaction, -1)
+
+    @discord.ui.button(emoji="▶️", style=discord.ButtonStyle.secondary)
+    async def next_page(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if self.page_count <= 1:
+            await interaction.response.defer(ephemeral=True)
+            return
+        await self._change_page(interaction, 1)
 
 
 class TradeView(BasePersistentView):
