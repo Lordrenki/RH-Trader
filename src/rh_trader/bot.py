@@ -1842,23 +1842,71 @@ class TradeThreadView(BasePersistentView):
         try:
             if isinstance(interaction.channel, discord.Thread):
                 guild = interaction.guild
-                for user_id in (self.seller_id, self.buyer_id):
-                    member = guild.get_member(user_id) if guild else None
-                    target = member or discord.Object(id=user_id)
+                reviewer_id = self.initiator_id
+                partner_id = self.buyer_id if reviewer_id == self.seller_id else self.seller_id
+                partner_member = guild.get_member(partner_id) if guild else None
+                try:
+                    await interaction.channel.remove_user(partner_member or discord.Object(id=partner_id))
+                except discord.HTTPException:
+                    _log.warning(
+                        "Failed to remove %s from trade thread %s", partner_id, interaction.channel.id
+                    )
+
+                async def finish_feedback(result_interaction: discord.Interaction) -> None:
+                    if not isinstance(result_interaction.channel, discord.Thread):
+                        return
+
+                    initiator_member = (
+                        result_interaction.guild.get_member(reviewer_id)
+                        if result_interaction.guild
+                        else None
+                    )
                     try:
-                        await interaction.channel.remove_user(target)
+                        await result_interaction.channel.remove_user(
+                            initiator_member or discord.Object(id=reviewer_id)
+                        )
                     except discord.HTTPException:
                         _log.warning(
-                            "Failed to remove %s from trade thread %s", user_id, interaction.channel.id
+                            "Failed to remove initiator %s from trade thread %s",
+                            reviewer_id,
+                            result_interaction.channel.id,
                         )
+
+                    try:
+                        await result_interaction.channel.edit(archived=True, locked=True)
+                    except discord.HTTPException:
+                        pass
+                    try:
+                        await result_interaction.channel.delete(reason="Trade closed")
+                    except discord.HTTPException:
+                        pass
+
+                prompt = info_embed(
+                    "⭐ Rate your partner",
+                    (
+                        f"Trade #{self.trade_id} for **{self.item}** is complete.\n"
+                        "Share a star rating and optional review before this thread closes."
+                    ),
+                )
+                prompt.set_footer(text="You'll be removed automatically after submitting feedback.")
+                rating_view = RatingView(
+                    self.db,
+                    self.trade_id,
+                    reviewer_id,
+                    partner_id,
+                    "buyer" if reviewer_id == self.buyer_id else "seller",
+                    self.item,
+                    on_finish=finish_feedback,
+                )
+                interaction.client.add_view(rating_view)
                 try:
-                    await interaction.channel.edit(archived=True, locked=True)
+                    await interaction.channel.send(
+                        content=f"<@{reviewer_id}>", embed=prompt, view=rating_view
+                    )
                 except discord.HTTPException:
-                    pass
-                try:
-                    await interaction.channel.delete(reason="Trade closed")
-                except discord.HTTPException:
-                    pass
+                    _log.warning(
+                        "Failed to send in-thread rating prompt for trade %s", self.trade_id
+                    )
         finally:
             self.disable_all_items()
             try:
@@ -1870,7 +1918,10 @@ class TradeThreadView(BasePersistentView):
         await interaction.response.send_message(
             embed=info_embed(
                 "✅ Trade closed",
-                "Thread access has been revoked for participants. Thanks for trading!",
+                (
+                    "I've removed the other participant. Please leave your rating in this "
+                    "thread to finish closing it."
+                ),
             ),
         )
         await send_rating_prompts(
@@ -1885,7 +1936,14 @@ class TradeThreadView(BasePersistentView):
 
 class ReviewModal(discord.ui.Modal):
     def __init__(
-        self, db: Database, trade_id: int, reviewer_id: int, target_id: int, item: str
+        self,
+        db: Database,
+        trade_id: int,
+        reviewer_id: int,
+        target_id: int,
+        item: str,
+        *,
+        on_complete: Callable[[discord.Interaction], Awaitable[None]] | None = None,
     ):
         super().__init__(title="Leave a review")
         self.db = db
@@ -1893,6 +1951,7 @@ class ReviewModal(discord.ui.Modal):
         self.reviewer_id = reviewer_id
         self.target_id = target_id
         self.item = item
+        self._on_complete = on_complete
         self.review_input = discord.ui.TextInput(
             label="Share your experience",
             style=discord.TextStyle.long,
@@ -1916,6 +1975,8 @@ class ReviewModal(discord.ui.Modal):
                 "Make sure you've rated your partner before submitting a review.",
             )
         await interaction.response.send_message(embed=embed, ephemeral=True)
+        if saved and self._on_complete is not None:
+            await self._on_complete(interaction)
 
 
 class StorePostView(BasePersistentView):
@@ -2311,7 +2372,15 @@ class TradeView(BasePersistentView):
 
 class RatingView(BasePersistentView):
     def __init__(
-        self, db: Database, trade_id: int, rater_id: int, partner_id: int, role: str, item: str
+        self,
+        db: Database,
+        trade_id: int,
+        rater_id: int,
+        partner_id: int,
+        role: str,
+        item: str,
+        *,
+        on_finish: Callable[[discord.Interaction], Awaitable[None]] | None = None,
     ) -> None:
         super().__init__()
         self.db = db
@@ -2320,6 +2389,10 @@ class RatingView(BasePersistentView):
         self.partner_id = partner_id
         self.role = role
         self.item = item
+        self.on_finish = on_finish
+        self.rating_submitted = False
+        self.review_submitted = False
+        self.feedback_finished = False
         prefix = f"rating:{trade_id}:{rater_id}:{partner_id}:{role}"
         self.rate_one.custom_id = f"{prefix}:1"
         self.rate_two.custom_id = f"{prefix}:2"
@@ -2327,6 +2400,8 @@ class RatingView(BasePersistentView):
         self.rate_four.custom_id = f"{prefix}:4"
         self.rate_five.custom_id = f"{prefix}:5"
         self.leave_review_button.custom_id = f"{prefix}:review"
+        self.finish_button.custom_id = f"{prefix}:finish"
+        self.finish_button.disabled = on_finish is None
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.rater_id:
@@ -2351,6 +2426,10 @@ class RatingView(BasePersistentView):
         recorded = await self.db.record_trade_rating(
             self.trade_id, self.rater_id, self.partner_id, score, self.role
         )
+        if recorded:
+            self.rating_submitted = True
+            if self.finish_button and self.finish_button.disabled:
+                self.finish_button.disabled = False
         self._disable_rating_buttons()
         embed = info_embed(
             "⭐ Rating received" if recorded else "ℹ️ Rating already recorded",
@@ -2411,8 +2490,44 @@ class RatingView(BasePersistentView):
                 self.rater_id,
                 self.partner_id,
                 self.item,
+                on_complete=self._complete_feedback,
             )
         )
+
+    async def _complete_feedback(self, interaction: discord.Interaction) -> None:
+        if self.feedback_finished or self.on_finish is None:
+            return
+        if not self.rating_submitted:
+            return
+
+        self.feedback_finished = True
+        self.disable_all_items()
+        try:
+            if interaction.message:
+                await interaction.message.edit(view=self)
+        except discord.HTTPException:
+            pass
+
+        await self.on_finish(interaction)
+
+    @discord.ui.button(label="Finish Feedback", style=discord.ButtonStyle.success, row=2)
+    async def finish_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if self.on_finish is None:
+            await interaction.response.defer(ephemeral=True)
+            return
+
+        if not self.rating_submitted:
+            await interaction.response.send_message(
+                embed=info_embed("⭐ Rate first", "Submit a star rating before closing this trade."),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message(
+            embed=info_embed("✅ Feedback complete", "Thanks! Closing out this trade thread."),
+            ephemeral=True,
+        )
+        await self._complete_feedback(interaction)
 
 
 def run_bot() -> None:
