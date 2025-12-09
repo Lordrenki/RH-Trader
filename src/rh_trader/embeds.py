@@ -45,6 +45,7 @@ def rating_summary(
     count: int,
     *,
     premium_boost: bool = False,
+    show_premium_boost_text: bool = True,
     boost_percent: float = 0.05,
 ) -> str:
     if count == 0:
@@ -53,7 +54,7 @@ def rating_summary(
     adjusted_score = score
     if premium_boost:
         adjusted_score = min(5.0, score * (1 + boost_percent))
-    suffix = " (Premium boost)" if premium_boost else ""
+    suffix = " (Premium boost)" if premium_boost and show_premium_boost_text else ""
 
     return f"⭐ {adjusted_score:.2f} average from {count} ratings{suffix}"
 
@@ -63,6 +64,7 @@ def response_summary(
     count: int,
     *,
     premium_boost: bool = False,
+    show_premium_boost_text: bool = True,
     boost_percent: float = 0.05,
 ) -> str:
     if count == 0:
@@ -71,6 +73,6 @@ def response_summary(
     adjusted_score = score
     if premium_boost:
         adjusted_score = min(10.0, score * (1 + boost_percent))
-    suffix = " (Premium boost)" if premium_boost else ""
+    suffix = " (Premium boost)" if premium_boost and show_premium_boost_text else ""
 
     return f"⚡ {adjusted_score:.1f}/10 response speed{suffix}"

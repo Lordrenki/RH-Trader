@@ -176,8 +176,18 @@ async def build_store_embeds(
 
     embeds: list[discord.Embed] = []
     premium_flag = is_premium or bool(stored_premium)
-    rating_line = rating_summary(score, count, premium_boost=premium_flag)
-    response_line = response_summary(response_score, response_count, premium_boost=premium_flag)
+    rating_line = rating_summary(
+        score,
+        count,
+        premium_boost=premium_flag,
+        show_premium_boost_text=False,
+    )
+    response_line = response_summary(
+        response_score,
+        response_count,
+        premium_boost=premium_flag,
+        show_premium_boost_text=False,
+    )
     descriptor_lines = [f"{rating_line} • {response_line}"]
     if store_tier_name:
         descriptor_lines.append(f"🏅 {store_tier_name}")
@@ -430,16 +440,28 @@ class TraderBot(commands.Bot):
 
             trade_label = "trade" if trades == 1 else "trades"
             description_lines = [
-                rating_summary(score, count, premium_boost=premium_flag),
+                rating_summary(
+                    score,
+                    count,
+                    premium_boost=premium_flag,
+                    show_premium_boost_text=False,
+                ),
                 f"🤝 {trades} {trade_label} completed",
-                response_summary(response_score, response_count, premium_boost=premium_flag),
-                f"💎 Status: {'Premium' if premium_flag else 'Standard user'}",
+                response_summary(
+                    response_score,
+                    response_count,
+                    premium_boost=premium_flag,
+                    show_premium_boost_text=False,
+                ),
+                f"💎 Status: {'Premium trader' if premium_flag else 'Standard trader'}",
             ]
 
             embed = info_embed(
                 f"🧾 Profile for {target.display_name}",
                 description="\n".join(description_lines),
             )
+            if premium_flag:
+                embed.set_thumbnail(url=PREMIUM_BADGE_URL)
             embed.add_field(
                 name="🕰️ Time zone",
                 value=timezone or "Not set",
