@@ -296,36 +296,6 @@ class TraderBot(commands.Bot):
             view.set_page_count(len(embeds))
             self.add_view(view)
 
-        for trade_id, seller_id, buyer_id, item, status in await self.db.list_trades_by_status(
-            {"pending", "open"}
-        ):
-            self.add_view(
-                TradeView(
-                    self.db, trade_id, seller_id, buyer_id, item, is_seller=True, status=status
-                )
-            )
-            self.add_view(
-                TradeView(
-                    self.db,
-                    trade_id,
-                    seller_id,
-                    buyer_id,
-                    item,
-                    is_seller=False,
-                    status=status,
-                )
-            )
-
-        for trade_id, seller_id, buyer_id, item, _ in await self.db.list_trades_by_status(
-            {"completed"}
-        ):
-            self.add_view(
-                RatingView(self.db, trade_id, seller_id, buyer_id, "seller", item)
-            )
-            self.add_view(
-                RatingView(self.db, trade_id, buyer_id, seller_id, "buyer", item)
-            )
-
     async def close(self) -> None:
         await self.catalog.close()
         await super().close()
@@ -899,62 +869,15 @@ class TraderBot(commands.Bot):
             try:
                 await target.send(
                     embed=embed,
-                    view=TradeAlertView(self.db, target.id, poster.id, default_item),
+                    content=(
+                        "Interested? Head to your server's trade channel to reply on their post. "
+                        "DM trading is disabled—keep the conversation in-channel."
+                    ),
                 )
             except discord.HTTPException:
                 _log.warning(
                     "Failed to send alert notification for %s to %s", default_item, target_id
                 )
-
-    async def on_message(self, message: discord.Message) -> None:
-        if message.author.bot:
-            return
-        await super().on_message(message)
-        if not isinstance(message.channel, discord.DMChannel):
-            return
-        trade = await self.db.get_active_trade_for_user(message.author.id)
-        if not trade:
-            open_trades = await self.db.list_open_trades_for_user(message.author.id)
-            if not open_trades:
-                return
-            if len(open_trades) > 1:
-                await message.channel.send(
-                    embed=info_embed(
-                        "🎯 Pick an active trade",
-                        (
-                            "You have multiple open trades. Use the **Set Active Trade** button"
-                            " on the trade card you want to chat about so I know who to DM."
-                        ),
-                    ),
-                    reference=message,
-                )
-                return
-            trade = open_trades[0]
-            await self.db.set_active_trade(message.author.id, trade[0])
-        trade_id, seller_id, buyer_id, item, _ = trade
-        partner_id = buyer_id if message.author.id == seller_id else seller_id
-        try:
-            partner = self.get_user(partner_id) or await self.fetch_user(partner_id)
-        except discord.HTTPException:
-            _log.warning("Failed to fetch partner %s for trade %s", partner_id, trade_id)
-            return
-
-        content = message.content.strip()
-        attachment_lines = [f"{attachment.filename}: {attachment.url}" for attachment in message.attachments]
-        payload = content or "[No message content]"
-        if attachment_lines:
-            payload += "\nAttachments:\n" + "\n".join(attachment_lines)
-
-        try:
-            await partner.send(
-                embed=info_embed(
-                    f"📨 Trade #{trade_id} update",
-                    f"Message from <@{message.author.id}> regarding **{item}**:\n{payload}",
-                )
-            )
-            await message.add_reaction("📨")
-        except discord.HTTPException:
-            _log.warning("Failed to relay message for trade %s", trade_id)
 
 
 class StockGroup(app_commands.Group):
@@ -1162,16 +1085,6 @@ class TradeGroup(app_commands.Group):
             ),
             ephemeral=True,
         )
-
-    @app_commands.command(name="start", description="Open a trade and move the conversation to DMs")
-    @app_commands.describe(partner="Partner involved in the trade", item="Item or service being traded")
-    async def start(
-        self,
-        interaction: discord.Interaction,
-        partner: discord.Member,
-        item: str,
-    ):
-        await start_trade_flow(interaction, self.db, interaction.user, partner, item)
 
 
 class WishlistGroup(app_commands.Group):
@@ -1662,126 +1575,6 @@ class TradeMenuView(discord.ui.View):
         )
 
 
-async def send_trade_invites(
-    bot: commands.Bot,
-    db: Database,
-    trade_id: int,
-    item: str,
-    seller_id: int,
-    buyer_id: int,
-    *,
-    status: str = "pending",
-) -> List[int]:
-    failed_ids: List[int] = []
-    for user_id in (seller_id, buyer_id):
-        partner_id = buyer_id if user_id == seller_id else seller_id
-        try:
-            user = bot.get_user(user_id) or await bot.fetch_user(user_id)
-            is_seller = user_id == seller_id
-            stats_line = ""
-            if is_seller and status == "pending":
-                (
-                    _,
-                    score,
-                    rating_count,
-                    response_score,
-                    response_count,
-                    *_,
-                    stored_premium,
-                ) = await db.profile(partner_id)
-                premium_flag = bool(stored_premium)
-                trades = await db.trade_count(partner_id)
-                trade_label = "trade" if trades == 1 else "trades"
-                stats_line = (
-                    f"\nTrader stats for <@{partner_id}>: {rating_summary(score, rating_count, premium_boost=premium_flag)}"
-                    f" • {response_summary(response_score, response_count, premium_boost=premium_flag)}"
-                    f" • {trades} {trade_label} completed."
-                )
-            pending_note = (
-                "\nPress **Accept Trade** to start or **Reject Trade** to decline."
-                if is_seller and status == "pending"
-                else "\nWaiting for your partner to accept the trade."
-            )
-            await user.send(
-                embed=info_embed(
-                    f"🤝 Trade #{trade_id} started",
-                    (
-                        f"Trade for **{item}** with <@{partner_id}>.\n"
-                        "Reply in this DM to send messages to your partner."
-                        f"{pending_note}"
-                        f"{stats_line}"
-                    ),
-                ),
-                view=TradeView(
-                    db,
-                    trade_id,
-                    seller_id,
-                    buyer_id,
-                    item,
-                    is_seller=is_seller,
-                    status=status,
-                ),
-            )
-        except (discord.Forbidden, discord.HTTPException):
-            failed_ids.append(user_id)
-            _log.warning("Failed to DM user %s for trade %s", user_id, trade_id)
-    return failed_ids
-
-
-async def start_trade_flow(
-    interaction: discord.Interaction,
-    db: Database,
-    initiator: discord.abc.User,
-    partner: discord.abc.User,
-    item: str,
-) -> None:
-    await interaction.response.defer(ephemeral=True)
-
-    cleaned_item = item.strip()
-    if not cleaned_item:
-        await interaction.followup.send(
-            embed=info_embed("⚠️ Invalid item", "Please provide an item to trade."),
-            ephemeral=True,
-        )
-        return
-
-    if partner.id == initiator.id:
-        await interaction.followup.send(
-            embed=info_embed("⚠️ Invalid trade", "You cannot open a trade with yourself."),
-            ephemeral=True,
-        )
-        return
-
-    seller_id = partner.id
-    buyer_id = initiator.id
-    trade_id = await db.create_trade(seller_id, buyer_id, cleaned_item)
-    failed_dm_ids = await send_trade_invites(
-        interaction.client, db, trade_id, cleaned_item, seller_id, buyer_id
-    )
-    if failed_dm_ids:
-        await db.delete_trade(trade_id)
-        targets = " and ".join(f"<@{user_id}>" for user_id in failed_dm_ids)
-        await interaction.followup.send(
-            embed=info_embed(
-                "🚫 Cannot start trade",
-                (
-                    f"I couldn't DM {targets}. They may have privacy settings or blocks enabled.\n"
-                    "The trade was not started."
-                ),
-            ),
-            ephemeral=True,
-        )
-        return
-
-    await interaction.followup.send(
-        embed=info_embed(
-            "🤝 Trade opened",
-            f"Trade #{trade_id} created with {partner.mention} for **{cleaned_item}**. Check your DMs to continue.",
-        ),
-        ephemeral=True,
-    )
-
-
 async def send_rating_prompts(
     bot: commands.Bot, db: Database, trade_id: int, item: str, seller_id: int, buyer_id: int
 ) -> None:
@@ -1812,68 +1605,6 @@ class BasePersistentView(discord.ui.View):
     def disable_all_items(self) -> None:
         for item in self.children:
             item.disabled = True
-
-
-class TradeRequestModal(discord.ui.Modal):
-    def __init__(self, db: Database, partner: discord.abc.User):
-        super().__init__(title="Start a trade")
-        self.db = db
-        self.partner = partner
-        self.item_input = discord.ui.TextInput(
-            label="Item you want to trade", placeholder="Ex: Halo Outfit"
-        )
-        self.add_item(self.item_input)
-
-    async def on_submit(self, interaction: discord.Interaction) -> None:
-        await start_trade_flow(
-            interaction, self.db, interaction.user, self.partner, self.item_input.value
-        )
-
-
-class TradeAlertView(discord.ui.View):
-    def __init__(self, db: Database, requester_id: int, partner_id: int, item: str):
-        super().__init__(timeout=600)
-        self.db = db
-        self.requester_id = requester_id
-        self.partner_id = partner_id
-        self.item = item
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.requester_id:
-            await interaction.response.send_message(
-                embed=info_embed(
-                    "🚫 Not your alert", "Only the notified trader can use this button."
-                ),
-                ephemeral=True,
-            )
-            return False
-        return True
-
-    @discord.ui.button(label="Start Trade", style=discord.ButtonStyle.primary, emoji="🤝")
-    async def start_trade(self, interaction: discord.Interaction, _: discord.ui.Button):
-        if interaction.user.id == self.partner_id:
-            await interaction.response.send_message(
-                embed=info_embed(
-                    "⚠️ Invalid trade", "You cannot start a trade with yourself."
-                ),
-                ephemeral=True,
-            )
-            return
-
-        try:
-            partner = interaction.client.get_user(self.partner_id) or await interaction.client.fetch_user(
-                self.partner_id
-            )
-        except discord.HTTPException:
-            await interaction.response.send_message(
-                embed=info_embed(
-                    "🚫 User unavailable", "I couldn't contact the trader. Please try again later."
-                ),
-                ephemeral=True,
-            )
-            return
-
-        await start_trade_flow(interaction, self.db, interaction.user, partner, self.item)
 
 
 class ReviewModal(discord.ui.Modal):
@@ -1982,7 +1713,7 @@ class StorePostView(BasePersistentView):
         self._sync_nav_buttons()
         await interaction.response.edit_message(embed=embeds[self.current_page], view=self)
 
-    @discord.ui.button(label="Start Trade", style=discord.ButtonStyle.primary, emoji="🤝")
+    @discord.ui.button(label="Contact Seller", style=discord.ButtonStyle.primary, emoji="🤝")
     async def start_trade(self, interaction: discord.Interaction, _: discord.ui.Button):
         if interaction.user.id == self.poster_id:
             await interaction.response.send_message(
@@ -1991,21 +1722,23 @@ class StorePostView(BasePersistentView):
             )
             return
 
-        try:
-            partner = interaction.client.get_user(self.poster_id) or await interaction.client.fetch_user(
-                self.poster_id
+        channel_hint = "Reply to this post in the trade channel to negotiate the deal."
+        if isinstance(interaction.channel, discord.TextChannel):
+            channel_hint = (
+                f"Use {interaction.channel.mention} to chat with <@{self.poster_id}> about this trade."
             )
-        except discord.HTTPException:
-            await interaction.response.send_message(
-                embed=info_embed(
-                    "🚫 User unavailable",
-                    "I couldn't contact the trader. Please try again later.",
-                ),
-                ephemeral=True,
-            )
-            return
 
-        await interaction.response.send_modal(TradeRequestModal(self.db, partner))
+        await interaction.response.send_message(
+            embed=info_embed(
+                "🤝 Discuss in-channel",
+                (
+                    "DM trading is disabled. "
+                    f"{channel_hint}\n"
+                    "Keep the conversation in the server so everyone stays on the same page."
+                ),
+            ),
+            ephemeral=True,
+        )
 
     @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary)
     async def previous_page(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -2044,7 +1777,6 @@ class TradeView(BasePersistentView):
         self.status = status
         role_label = "seller" if is_seller else "buyer"
         base_custom_id = f"trade:{trade_id}:{role_label}"
-        self.set_active_button.custom_id = f"{base_custom_id}:active"
         self.complete_button.custom_id = f"{base_custom_id}:complete"
         self.cancel_button.custom_id = f"{base_custom_id}:cancel"
         self.accept_button.custom_id = f"{base_custom_id}:accept"
@@ -2057,7 +1789,6 @@ class TradeView(BasePersistentView):
         closed = self.status in {"completed", "cancelled", "rejected"}
 
         # Buttons that should only work after acceptance
-        self.set_active_button.disabled = not open_status
         self.complete_button.disabled = not open_status
         self.cancel_button.disabled = closed
         self.accept_button.disabled = not (pending and self.is_seller)
@@ -2110,40 +1841,6 @@ class TradeView(BasePersistentView):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return await self._get_trade(interaction) is not None
 
-    @discord.ui.button(label="Set Active Trade", style=discord.ButtonStyle.primary, emoji="🎯")
-    async def set_active_button(self, interaction: discord.Interaction, _: discord.ui.Button):
-        trade = await self._get_trade(interaction)
-        if trade is None:
-            return
-        if self.status != "open":
-            await interaction.response.send_message(
-                embed=info_embed(
-                    "⏳ Waiting for acceptance",
-                    "Your partner must accept the trade before you can set it as active.",
-                ),
-                ephemeral=True,
-            )
-            return
-
-        saved = await self.db.set_active_trade(interaction.user.id, self.trade_id)
-        if not saved:
-            await interaction.response.send_message(
-                embed=info_embed(
-                    "🚫 Trade not active",
-                    "I couldn't mark this trade as active. Make sure it's still open.",
-                ),
-                ephemeral=True,
-            )
-            return
-
-        await interaction.response.send_message(
-            embed=info_embed(
-                "🎯 Active trade set",
-                "I'll forward your DM replies to this trade partner.",
-            ),
-            ephemeral=True,
-        )
-
     @discord.ui.button(label="Mark Trade Completed", style=discord.ButtonStyle.green, emoji="✅")
     async def complete_button(self, interaction: discord.Interaction, _: discord.ui.Button):
         trade = await self._get_trade(interaction)
@@ -2180,8 +1877,6 @@ class TradeView(BasePersistentView):
             embed=info_embed("✅ Trade completed", f"Trade #{self.trade_id} for **{self.item}** is now complete."),
             ephemeral=True,
         )
-        await self.db.clear_active_trade(self.seller_id, self.trade_id)
-        await self.db.clear_active_trade(self.buyer_id, self.trade_id)
         await send_rating_prompts(interaction.client, self.db, self.trade_id, self.item, self.seller_id, self.buyer_id)
 
     @discord.ui.button(label="Cancel Trade", style=discord.ButtonStyle.danger, emoji="🛑")
@@ -2216,8 +1911,6 @@ class TradeView(BasePersistentView):
             ),
             ephemeral=True,
         )
-        await self.db.clear_active_trade(self.seller_id, self.trade_id)
-        await self.db.clear_active_trade(self.buyer_id, self.trade_id)
 
     @discord.ui.button(label="Accept Trade", style=discord.ButtonStyle.success, emoji="✅")
     async def accept_button(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -2252,13 +1945,10 @@ class TradeView(BasePersistentView):
         except discord.HTTPException:
             pass
 
-        await self.db.set_active_trade(self.seller_id, self.trade_id)
-        await self.db.set_active_trade(self.buyer_id, self.trade_id)
-
         await interaction.response.send_message(
             embed=info_embed(
                 "✅ Trade accepted",
-                "You can now chat in this DM and mark the trade active when ready.",
+                "You can now coordinate in this DM thread and update the trade status here.",
             ),
             ephemeral=True,
         )
@@ -2272,7 +1962,7 @@ class TradeView(BasePersistentView):
                     f"✅ Trade #{self.trade_id} accepted",
                     (
                         f"<@{self.seller_id}> accepted the trade for **{self.item}**.\n"
-                        "Use the buttons below to set this as your active DM thread or close it."
+                        "Use the buttons below to manage the trade status."
                     ),
                 ),
                 view=TradeView(
