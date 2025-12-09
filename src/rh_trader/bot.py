@@ -5,7 +5,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Awaitable, Callable, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, List, Optional, Tuple
 
 import discord
 from discord import app_commands
@@ -166,7 +166,8 @@ async def _enforce_listing_limit(
     if current_count < limit:
         return False
 
-    await interaction.response.send_message(
+    await _send_interaction_message(
+        interaction,
         embed=info_embed(
             "🚫 Limit reached",
             (
@@ -177,6 +178,18 @@ async def _enforce_listing_limit(
         ephemeral=True,
     )
     return True
+
+
+async def _send_interaction_message(
+    interaction: discord.Interaction, /, **kwargs: Any
+) -> None:
+    """Send or follow up depending on whether the interaction is already acknowledged."""
+
+    if interaction.response.is_done():
+        await interaction.followup.send(**kwargs)
+        return
+
+    await interaction.response.send_message(**kwargs)
 
 
 async def _lookup_display_name(client: discord.Client, user_id: int) -> str:
@@ -1122,7 +1135,8 @@ class StockGroup(app_commands.Group):
         qty = max(1, quantity)
         item_name = item.strip()
         if not item_name:
-            await interaction.response.send_message(
+            await _send_interaction_message(
+                interaction,
                 embed=info_embed("⚠️ Item required", "Please enter an item name."),
                 ephemeral=True,
             )
@@ -1137,7 +1151,7 @@ class StockGroup(app_commands.Group):
         embed = info_embed(
             "📦 Stock updated", f"Added **{item_name}** x{qty} to your inventory."
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await _send_interaction_message(interaction, embed=embed, ephemeral=True)
 
     @app_commands.command(
         name="change", description="Change the quantity for an item in your stock list"
