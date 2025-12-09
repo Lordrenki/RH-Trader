@@ -28,7 +28,10 @@ class Database:
                     rating_total INTEGER DEFAULT 0,
                     rating_count INTEGER DEFAULT 0,
                     response_total INTEGER DEFAULT 0,
-                    response_count INTEGER DEFAULT 0
+                    response_count INTEGER DEFAULT 0,
+                    timezone TEXT DEFAULT '',
+                    bio TEXT DEFAULT '',
+                    is_premium INTEGER DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS inventories (
@@ -169,6 +172,12 @@ class Database:
             await db.execute("ALTER TABLE users ADD COLUMN response_total INTEGER DEFAULT 0")
         if "response_count" not in columns:
             await db.execute("ALTER TABLE users ADD COLUMN response_count INTEGER DEFAULT 0")
+        if "timezone" not in columns:
+            await db.execute("ALTER TABLE users ADD COLUMN timezone TEXT DEFAULT ''")
+        if "bio" not in columns:
+            await db.execute("ALTER TABLE users ADD COLUMN bio TEXT DEFAULT ''")
+        if "is_premium" not in columns:
+            await db.execute("ALTER TABLE users ADD COLUMN is_premium INTEGER DEFAULT 0")
         await db.commit()
 
     async def _ensure_trade_post_columns(self, db: aiosqlite.Connection) -> None:
@@ -799,19 +808,35 @@ class Database:
             )
             return await cursor.fetchall()
 
-    async def profile(self, user_id: int) -> Tuple[str, float, int, float, int]:
+    async def profile(self, user_id: int) -> Tuple[str, float, int, float, int, str, str, bool]:
         async with self._connect() as db:
             cursor = await db.execute(
                 "SELECT contact,\n"
                 "CASE WHEN rating_count = 0 THEN 0 ELSE CAST(rating_total AS FLOAT) / rating_count END AS score,\n"
                 "rating_count,\n"
                 "CASE WHEN response_count = 0 THEN 0 ELSE CAST(response_total AS FLOAT) / response_count END AS response_score,\n"
-                "response_count\n"
+                "response_count,\n"
+                "timezone,\n"
+                "bio,\n"
+                "is_premium\n"
                 "FROM users WHERE user_id = ?",
                 (user_id,),
             )
             row = await cursor.fetchone()
-            return row or ("", 0.0, 0, 0.0, 0)
+            if row is None:
+                return "", 0.0, 0, 0.0, 0, "", "", False
+
+            contact, score, rating_count, response_score, response_count, timezone, bio, is_premium = row
+            return (
+                contact,
+                score,
+                rating_count,
+                response_score,
+                response_count,
+                timezone,
+                bio,
+                bool(is_premium),
+            )
 
     async def trade_count(self, user_id: int) -> int:
         async with self._connect() as db:
@@ -821,6 +846,45 @@ class Database:
             )
             row = await cursor.fetchone()
             return row[0] if row else 0
+
+    async def set_timezone(self, user_id: int, timezone: str) -> None:
+        await self.ensure_user(user_id)
+        async with self._lock:
+            async with self._connect() as db:
+                await db.execute(
+                    "UPDATE users SET timezone = ? WHERE user_id = ?",
+                    (timezone.strip(), user_id),
+                )
+                await db.commit()
+
+    async def set_bio(self, user_id: int, bio: str) -> None:
+        await self.ensure_user(user_id)
+        async with self._lock:
+            async with self._connect() as db:
+                await db.execute(
+                    "UPDATE users SET bio = ? WHERE user_id = ?",
+                    (bio.strip(), user_id),
+                )
+                await db.commit()
+
+    async def set_premium_status(self, user_id: int, is_premium: bool) -> None:
+        await self.ensure_user(user_id)
+        async with self._lock:
+            async with self._connect() as db:
+                await db.execute(
+                    "UPDATE users SET is_premium = ? WHERE user_id = ?",
+                    (int(is_premium), user_id),
+                )
+                await db.commit()
+
+    async def recent_reviews_for_user(self, user_id: int, limit: int = 3) -> List[Tuple[int, str, int]]:
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "SELECT reviewer_id, review, created_at\n"
+                "FROM trade_reviews WHERE target_id = ? ORDER BY created_at DESC LIMIT ?",
+                (user_id, limit),
+            )
+            return await cursor.fetchall()
 
     async def clear_history(self, table: str, user_id: int) -> None:
         if table not in {"offers", "requests"}:
