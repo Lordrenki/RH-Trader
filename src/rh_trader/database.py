@@ -84,6 +84,15 @@ class Database:
                     PRIMARY KEY (trade_id, rater_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS trade_reviews (
+                    trade_id INTEGER NOT NULL,
+                    reviewer_id INTEGER NOT NULL,
+                    target_id INTEGER NOT NULL,
+                    review TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    PRIMARY KEY (trade_id, reviewer_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS quick_ratings (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     rater_id INTEGER NOT NULL,
@@ -692,6 +701,56 @@ class Database:
                 await db.commit()
                 return True
 
+    async def has_trade_rating(self, trade_id: int, rater_id: int) -> bool:
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "SELECT 1 FROM trade_feedback WHERE trade_id = ? AND rater_id = ?",
+                (trade_id, rater_id),
+            )
+            return await cursor.fetchone() is not None
+
+    async def record_trade_review(
+        self, trade_id: int, reviewer_id: int, target_id: int, review: str
+    ) -> bool:
+        """Store or update an optional written review for a completed trade."""
+
+        cleaned = review.strip()
+        if not cleaned:
+            return False
+
+        await self.ensure_user(reviewer_id)
+        await self.ensure_user(target_id)
+        async with self._lock:
+            async with self._connect() as db:
+                cursor = await db.execute(
+                    "SELECT 1 FROM trade_feedback WHERE trade_id = ? AND rater_id = ?",
+                    (trade_id, reviewer_id),
+                )
+                if await cursor.fetchone() is None:
+                    return False
+
+                now_ts = int(time.time())
+                await db.execute(
+                    "INSERT INTO trade_reviews(trade_id, reviewer_id, target_id, review, created_at)\n"
+                    "VALUES (?, ?, ?, ?, ?)\n"
+                    "ON CONFLICT(trade_id, reviewer_id) DO UPDATE SET\n"
+                    "review = excluded.review,\n"
+                    "target_id = excluded.target_id,\n"
+                    "created_at = excluded.created_at",
+                    (trade_id, reviewer_id, target_id, cleaned, now_ts),
+                )
+                await db.commit()
+                return True
+
+    async def latest_review_for_user(self, user_id: int) -> Tuple[int, str, int] | None:
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "SELECT reviewer_id, review, created_at\n"
+                "FROM trade_reviews WHERE target_id = ? ORDER BY created_at DESC LIMIT 1",
+                (user_id,),
+            )
+            return await cursor.fetchone()
+
     async def set_trade_status(
         self, trade_id: int, status: str, *, create_if_missing: Tuple[int, int, str] | None = None
     ) -> None:
@@ -875,6 +934,7 @@ class Database:
                 "wishlist",
                 "trades",
                 "trade_feedback",
+                "trade_reviews",
                 "guild_settings",
                 "store_post_logs",
             ]:

@@ -31,6 +31,7 @@ DEFAULT_STORE_LISTING_LIMIT = 10
 DEFAULT_EMBED_COLOR = 0x2B2D31
 PREMIUM_EMBED_COLOR = 0xFFD700
 EMBED_FIELD_CHAR_LIMIT = 1000
+REVIEW_CHAR_LIMIT = 300
 PREMIUM_BADGE_URL = (
     "https://cdn.discordapp.com/attachments/1431560702518104175/1447739322022498364/"
     "discotools-xyz-icon.png?ex=6938b7d0&is=69376650&hm=bd0daea439bc5d7622d4b7008ba08ba8f5e44f30a79394a23dd58f5f5a07a3e6"
@@ -119,6 +120,7 @@ async def build_store_embeds(
     image_url: str | None,
 ) -> list[discord.Embed]:
     contact, score, count, response_score, response_count = await db.profile(user_id)
+    latest_review = await db.latest_review_for_user(user_id)
     stock = await db.get_stock(user_id)
     wishlist = await db.get_wishlist(user_id)
 
@@ -159,6 +161,12 @@ async def build_store_embeds(
             embed.set_thumbnail(url=badge_url)
         embed.add_field(name="📦 Inventory", value=stock_value, inline=False)
         embed.add_field(name="🎯 Wishlist", value=wishlist_value, inline=False)
+        if latest_review:
+            reviewer_id, review_text, _ = latest_review
+            review_value = f"{review_text}\n— <@{reviewer_id}>"
+            embed.add_field(
+                name="📝 Latest review", value=review_value, inline=False
+            )
         if image_url:
             embed.set_image(url=image_url)
         embed.set_footer(text="RH-Trader • Made with ♡ by Kuro")
@@ -1308,6 +1316,41 @@ class TradeRequestModal(discord.ui.Modal):
         )
 
 
+class ReviewModal(discord.ui.Modal):
+    def __init__(
+        self, db: Database, trade_id: int, reviewer_id: int, target_id: int, item: str
+    ):
+        super().__init__(title="Leave a review")
+        self.db = db
+        self.trade_id = trade_id
+        self.reviewer_id = reviewer_id
+        self.target_id = target_id
+        self.item = item
+        self.review_input = discord.ui.TextInput(
+            label="Share your experience",
+            style=discord.TextStyle.long,
+            placeholder="What stood out about this trade?",
+            max_length=REVIEW_CHAR_LIMIT,
+        )
+        self.add_item(self.review_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        saved = await self.db.record_trade_review(
+            self.trade_id, self.reviewer_id, self.target_id, self.review_input.value
+        )
+        if saved:
+            embed = info_embed(
+                "📝 Review saved",
+                f"Thanks! Your review for <@{self.target_id}> was recorded.",
+            )
+        else:
+            embed = info_embed(
+                "⚠️ Review not saved",
+                "Make sure you've rated your partner before submitting a review.",
+            )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 class StorePostView(BasePersistentView):
     def __init__(
         self,
@@ -1755,6 +1798,7 @@ class RatingView(BasePersistentView):
         self.rate_three.custom_id = f"{prefix}:3"
         self.rate_four.custom_id = f"{prefix}:4"
         self.rate_five.custom_id = f"{prefix}:5"
+        self.leave_review_button.custom_id = f"{prefix}:review"
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.rater_id:
@@ -1765,17 +1809,31 @@ class RatingView(BasePersistentView):
             return False
         return True
 
+    def _disable_rating_buttons(self) -> None:
+        for button in (
+            self.rate_one,
+            self.rate_two,
+            self.rate_three,
+            self.rate_four,
+            self.rate_five,
+        ):
+            button.disabled = True
+
     async def _handle_rating(self, interaction: discord.Interaction, score: int) -> None:
         recorded = await self.db.record_trade_rating(
             self.trade_id, self.rater_id, self.partner_id, score, self.role
         )
-        self.disable_all_items()
+        self._disable_rating_buttons()
         embed = info_embed(
             "⭐ Rating received" if recorded else "ℹ️ Rating already recorded",
             f"You rated <@{self.partner_id}> {score} star(s) for **{self.item}**."
             if recorded
             else "You have already submitted feedback for this trade.",
         )
+        if recorded:
+            embed.description += "\nTap **Leave Review** to share a short note about this trade (optional)."
+        else:
+            embed.description += "\nYou can still use **Leave Review** to update your written feedback."
         await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(label="1", style=discord.ButtonStyle.gray)
@@ -1797,6 +1855,36 @@ class RatingView(BasePersistentView):
     @discord.ui.button(label="5", style=discord.ButtonStyle.success)
     async def rate_five(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self._handle_rating(interaction, 5)
+
+    @discord.ui.button(
+        label="Leave Review (optional)",
+        style=discord.ButtonStyle.secondary,
+        emoji="📝",
+        row=1,
+    )
+    async def leave_review_button(
+        self, interaction: discord.Interaction, _: discord.ui.Button
+    ):
+        has_rating = await self.db.has_trade_rating(self.trade_id, self.rater_id)
+        if not has_rating:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "⭐ Rate first",
+                    "Please submit a star rating before leaving a review.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_modal(
+            ReviewModal(
+                self.db,
+                self.trade_id,
+                self.rater_id,
+                self.partner_id,
+                self.item,
+            )
+        )
 
 
 def run_bot() -> None:
