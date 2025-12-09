@@ -347,7 +347,9 @@ class TraderBot(commands.Bot):
             )
             await interaction.response.send_message(
                 embed=embed,
-                view=TradeMenuView(self.db, self._handle_store_post),
+                view=TradeMenuView(
+                    self.db, self._handle_store_post, self._update_store_post
+                ),
                 ephemeral=True,
             )
 
@@ -650,6 +652,117 @@ class TraderBot(commands.Bot):
             image_url=image_url,
         )
         await self._send_alert_notifications(interaction.user, stock)
+
+    async def _update_store_post(self, interaction: discord.Interaction) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "🌐 Guild only", "You can only update store posts inside a server."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        previous_post = await self.db.get_trade_post(
+            interaction.guild.id, interaction.user.id
+        )
+        if not previous_post:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "📭 No store post found",
+                    "Share your shop with /poststore before trying to refresh it.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        channel_id, message_id, listing_limit, store_tier_name, is_premium, image_url = (
+            previous_post
+        )
+        channel = interaction.client.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await interaction.client.fetch_channel(channel_id)
+            except discord.HTTPException:
+                channel = None
+
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "🚫 Cannot refresh",
+                    "I can't access your previous store post. Please use /poststore again.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        try:
+            message = await channel.fetch_message(message_id)
+        except discord.NotFound:
+            await self.db.delete_trade_post(interaction.guild.id, interaction.user.id)
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "📭 No store post found",
+                    "I couldn't find your previous store post. Please use /poststore to share it again.",
+                ),
+                ephemeral=True,
+            )
+            return
+        except discord.HTTPException:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "🚫 Cannot refresh",
+                    "I couldn't update your store post right now. Please try again later.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        listing_limit = max(1, listing_limit or DEFAULT_STORE_LISTING_LIMIT)
+        badge_url = PREMIUM_BADGE_URL if is_premium else None
+        embeds = await build_store_embeds(
+            self.db,
+            interaction.user.id,
+            interaction.user.display_name,
+            avatar_url=interaction.user.display_avatar.url,
+            listing_limit=listing_limit,
+            store_tier_name=store_tier_name or None,
+            is_premium=bool(is_premium),
+            badge_url=badge_url,
+            image_url=image_url or None,
+        )
+
+        view = StorePostView(
+            self.db,
+            interaction.user.id,
+            interaction.user.display_name,
+            listing_limit=listing_limit,
+            store_tier_name=store_tier_name or None,
+            is_premium=bool(is_premium),
+            badge_url=badge_url,
+            image_url=image_url or None,
+        )
+        view.set_page_count(len(embeds))
+
+        try:
+            await message.edit(embed=embeds[0], view=view)
+        except discord.HTTPException:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "🚫 Cannot refresh",
+                    "I couldn't update your store post right now. Please try again later.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message(
+            embed=info_embed(
+                "✅ Store refreshed",
+                "Your existing store post has been updated without creating a new one.",
+            ),
+            ephemeral=True,
+        )
 
     async def _send_alert_notifications(
         self, poster: discord.abc.User | discord.Member, stock: list[Tuple[str, int]]
@@ -1362,10 +1475,12 @@ class TradeMenuView(discord.ui.View):
         self,
         db: Database,
         store_post_handler: Callable[[discord.Interaction, Optional[discord.Attachment]], Awaitable[None]],
+        store_update_handler: Callable[[discord.Interaction], Awaitable[None]],
     ):
         super().__init__(timeout=600)
         self.db = db
         self._store_post_handler = store_post_handler
+        self._store_update_handler = store_update_handler
 
     async def _send_snapshot(self, interaction: discord.Interaction) -> None:
         stock = await self.db.get_stock(interaction.user.id)
@@ -1426,6 +1541,10 @@ class TradeMenuView(discord.ui.View):
     @discord.ui.button(label="Set Time Zone", style=discord.ButtonStyle.secondary, emoji="🕰️", row=2)
     async def set_timezone(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.send_modal(TimezoneModal(self.db))
+
+    @discord.ui.button(label="Update Store", style=discord.ButtonStyle.primary, emoji="♻️", row=2)
+    async def update_store(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._store_update_handler(interaction)
 
     @discord.ui.button(label="Post Store", style=discord.ButtonStyle.primary, emoji="🏪", row=2)
     async def poststore(self, interaction: discord.Interaction, _: discord.ui.Button):
