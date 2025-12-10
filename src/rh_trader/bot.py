@@ -560,7 +560,7 @@ class TraderBot(commands.Bot):
                 )
                 return
             description = "\n".join(
-                f"{idx+1}. <@{user_id}> — {rating_summary(score, count, premium_boost=is_premium)}"
+                f"{idx+1}. <@{user_id}> — {_summary_with_optional_boost_text(rating_summary, score, count, premium_boost=is_premium, show_premium_boost_text=False)}"
                 for idx, (user_id, score, count, is_premium) in enumerate(rows)
             )
             await interaction.response.send_message(embed=info_embed("🏆 Leaderboard", description))
