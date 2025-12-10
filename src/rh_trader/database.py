@@ -248,6 +248,14 @@ class Database:
                 )
                 await db.commit()
 
+    async def list_known_users(self) -> List[int]:
+        """Return all users that have interacted with the bot."""
+
+        async with self._connect() as db:
+            cursor = await db.execute("SELECT user_id FROM users ORDER BY user_id")
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
+
     async def set_contact(self, user_id: int, contact: str) -> None:
         await self.ensure_user(user_id)
         async with self._lock:
