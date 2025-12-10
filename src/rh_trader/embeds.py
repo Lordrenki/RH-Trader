@@ -75,4 +75,5 @@ def response_summary(
         adjusted_score = min(10.0, score * (1 + boost_percent))
     suffix = " (Premium boost)" if premium_boost and show_premium_boost_text else ""
 
+    # Response output intentionally omits trade counts to keep the display concise.
     return f"⚡ {adjusted_score:.1f}/10 response speed{suffix}"

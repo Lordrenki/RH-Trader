@@ -1,7 +1,7 @@
 import pytest
 
-from src.rh_trader.bot import _summary_with_optional_boost_text
-from src.rh_trader.embeds import rating_summary
+from rh_trader.bot import _summary_with_optional_boost_text
+from rh_trader.embeds import rating_summary
 
 
 def test_summary_helper_uses_show_flag_when_supported():

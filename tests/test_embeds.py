@@ -20,6 +20,17 @@ def test_format_helpers_render_text():
     assert "4.50" in summary
 
 
+def test_response_summary_omits_trade_count():
+    summary = embeds.response_summary(9.95, 5)
+
+    assert "trade" not in summary.lower()
+    assert summary.startswith("⚡ 9.9/10 response speed")
+
+
+def test_response_summary_handles_zero_count():
+    assert embeds.response_summary(0, 0) == "⚡ No response data yet"
+
+
 def test_info_embed_sets_footer():
     embed = embeds.info_embed("Title", "Body")
     assert isinstance(embed, discord.Embed)
