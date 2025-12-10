@@ -172,6 +172,13 @@ async def test_trade_flow(tmp_path: Path):
     assert response_count == 1
     assert 1 <= response_score <= 10
 
+    _, _, _, partner_response_score, partner_response_count, *_ = await db.profile(6)
+    assert partner_response_count == 1
+    assert 1 <= partner_response_score <= 10
+
+    trades = [row for table, row in [entry async for entry in db.dump_state()] if table == "trades"]
+    assert trades[0][10] == 1  # response_recorded flag set
+
 
 async def test_trade_reviews(tmp_path: Path):
     db = await init_db(tmp_path)
