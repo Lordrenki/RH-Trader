@@ -600,7 +600,6 @@ class TraderBot(commands.Bot):
             )
 
         @self.tree.command(description="Set the store post channel for this server")
-        @app_commands.checks.has_permissions(manage_guild=True)
         @app_commands.describe(channel="Channel where /poststore submissions will be sent")
         async def set_trade_channel(
             interaction: discord.Interaction, channel: discord.TextChannel
@@ -612,11 +611,59 @@ class TraderBot(commands.Bot):
                 )
                 return
 
+            perms = getattr(interaction.user, "guild_permissions", None)
+            if not (perms and (perms.manage_guild or perms.administrator)):
+                await interaction.response.send_message(
+                    embed=info_embed(
+                        "🚫 Missing permissions",
+                        "You need Manage Server or Administrator permissions to set the store channel.",
+                    ),
+                    ephemeral=True,
+                )
+                return
+
             await db.set_trade_channel(interaction.guild.id, channel.id)
+            await db.record_store_channel(interaction.guild.id, channel.id)
             await interaction.response.send_message(
                 embed=info_embed(
                     "✅ Store channel saved",
                     f"Store posts will be sent to {channel.mention}.",
+                ),
+                ephemeral=True,
+            )
+
+        @self.tree.command(
+            description="Set the channel where trade threads should be created for this server"
+        )
+        @app_commands.describe(channel="Channel where trade threads will be opened")
+        async def set_trade_thread_channel(
+            interaction: discord.Interaction, channel: discord.TextChannel
+        ):
+            if interaction.guild is None:
+                await interaction.response.send_message(
+                    embed=info_embed(
+                        "🌐 Guild only", "This command can only be used inside a server."
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            perms = getattr(interaction.user, "guild_permissions", None)
+            if not (perms and (perms.manage_guild or perms.administrator)):
+                await interaction.response.send_message(
+                    embed=info_embed(
+                        "🚫 Missing permissions",
+                        "You need Manage Server or Administrator permissions to set the trade thread channel.",
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            await db.set_trade_thread_channel(interaction.guild.id, channel.id)
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "✅ Trade thread channel saved",
+                    f"New trade threads will be created in {channel.mention}.",
                 ),
                 ephemeral=True,
             )
@@ -678,10 +725,14 @@ class TraderBot(commands.Bot):
             )
             return
 
-        channel = self.get_channel(TRADE_THREAD_CHANNEL_ID)
+        channel_id = await self.db.get_trade_thread_channel(interaction.guild.id)
+        if channel_id is None:
+            channel_id = TRADE_THREAD_CHANNEL_ID
+
+        channel = self.get_channel(channel_id)
         if channel is None:
             try:
-                channel = await self.fetch_channel(TRADE_THREAD_CHANNEL_ID)
+                channel = await self.fetch_channel(channel_id)
             except discord.HTTPException:
                 channel = None
 
@@ -811,6 +862,8 @@ class TraderBot(commands.Bot):
                 ephemeral=True,
             )
             return
+
+        await db.record_store_channel(interaction.guild.id, channel.id)
 
         if image and image.content_type and not image.content_type.startswith("image"):
             await interaction.response.send_message(

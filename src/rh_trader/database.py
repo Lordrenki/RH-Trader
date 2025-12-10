@@ -108,8 +108,17 @@ class Database:
 
                 CREATE TABLE IF NOT EXISTS guild_settings (
                     guild_id INTEGER PRIMARY KEY,
-                    trade_channel_id INTEGER
+                    trade_channel_id INTEGER,
+                    trade_thread_channel_id INTEGER
                 );
+
+                CREATE TABLE IF NOT EXISTS store_channel_logs (
+                    guild_id INTEGER NOT NULL,
+                    channel_id INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_store_channel_logs_guild_channel
+                    ON store_channel_logs(guild_id, channel_id, created_at DESC);
 
                 CREATE TABLE IF NOT EXISTS trade_posts (
                     guild_id INTEGER NOT NULL,
@@ -147,6 +156,8 @@ class Database:
             await self._ensure_trade_columns(db)
             await self._ensure_user_columns(db)
             await self._ensure_trade_post_columns(db)
+            await self._ensure_guild_settings_columns(db)
+            await self._ensure_store_channel_logs(db)
 
     def _connect(self) -> aiosqlite.Connection:
         return aiosqlite.connect(self.path)
@@ -197,6 +208,36 @@ class Database:
             await db.execute("ALTER TABLE trade_posts ADD COLUMN is_premium INTEGER DEFAULT 0")
         if "image_url" not in columns:
             await db.execute("ALTER TABLE trade_posts ADD COLUMN image_url TEXT DEFAULT ''")
+        await db.commit()
+
+    async def _ensure_guild_settings_columns(self, db: aiosqlite.Connection) -> None:
+        cursor = await db.execute("PRAGMA table_info(guild_settings)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        if "trade_thread_channel_id" not in columns:
+            await db.execute(
+                "ALTER TABLE guild_settings ADD COLUMN trade_thread_channel_id INTEGER"
+            )
+        await db.commit()
+
+    async def _ensure_store_channel_logs(self, db: aiosqlite.Connection) -> None:
+        cursor = await db.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'store_channel_logs'"
+        )
+        exists = await cursor.fetchone()
+        if exists:
+            return
+
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS store_channel_logs (
+                guild_id INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_store_channel_logs_guild_channel
+                ON store_channel_logs(guild_id, channel_id, created_at DESC);
+            """
+        )
         await db.commit()
 
     async def ensure_user(self, user_id: int) -> None:
@@ -1066,6 +1107,7 @@ class Database:
                 "trade_reviews",
                 "guild_settings",
                 "store_post_logs",
+                "store_channel_logs",
             ]:
                 cursor = await db.execute(f"SELECT * FROM {table}")
                 for row in await cursor.fetchall():
@@ -1092,3 +1134,48 @@ class Database:
             )
             row = await cursor.fetchone()
             return row[0] if row else None
+
+    async def set_trade_thread_channel(
+        self, guild_id: int, channel_id: Optional[int]
+    ) -> None:
+        """Persist the configured trade thread channel for a guild."""
+
+        async with self._lock:
+            async with self._connect() as db:
+                await db.execute(
+                    "INSERT INTO guild_settings(guild_id, trade_thread_channel_id) VALUES (?, ?)\n"
+                    "ON CONFLICT(guild_id) DO UPDATE SET trade_thread_channel_id = excluded.trade_thread_channel_id",
+                    (guild_id, channel_id),
+                )
+                await db.commit()
+
+    async def get_trade_thread_channel(self, guild_id: int) -> Optional[int]:
+        """Return the configured trade thread channel, if present."""
+
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "SELECT trade_thread_channel_id FROM guild_settings WHERE guild_id = ?",
+                (guild_id,),
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else None
+
+    async def record_store_channel(self, guild_id: int, channel_id: int) -> None:
+        """Record guild/channel pairs that should receive store posts."""
+
+        async with self._lock:
+            async with self._connect() as db:
+                await db.execute(
+                    "INSERT INTO store_channel_logs(guild_id, channel_id, created_at) VALUES (?, ?, ?)",
+                    (guild_id, channel_id, int(time.time())),
+                )
+                await db.commit()
+
+    async def list_store_channels(self) -> List[Tuple[int, int]]:
+        """Return unique guild/channel pairs configured for store posts."""
+
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "SELECT DISTINCT guild_id, channel_id FROM store_channel_logs"
+            )
+            return await cursor.fetchall()
