@@ -1798,25 +1798,40 @@ class TradeMenuView(discord.ui.View):
 
 
 async def send_rating_prompts(
-    bot: commands.Bot, db: Database, trade_id: int, item: str, seller_id: int, buyer_id: int
+    bot: commands.Bot,
+    db: Database,
+    trade_id: int,
+    item: str,
+    seller_id: int,
+    buyer_id: int,
+    *,
+    thread: discord.Thread | None,
 ) -> None:
+    if thread is None:
+        _log.warning("Skipping rating prompts for trade %s because no thread was provided", trade_id)
+        return
+
     for user_id in (seller_id, buyer_id):
         partner_id = buyer_id if user_id == seller_id else seller_id
         role_value = "seller" if user_id == seller_id else "buyer"
+        rating_view = RatingView(db, trade_id, user_id, partner_id, role_value, item)
+        bot.add_view(rating_view)
         try:
-            user = bot.get_user(user_id) or await bot.fetch_user(user_id)
-            await user.send(
+            await thread.send(
+                content=f"<@{user_id}>",
                 embed=info_embed(
                     "⭐ Rate your partner",
                     (
                         f"Trade #{trade_id} for **{item}** is complete.\n"
-                        f"You traded with <@{partner_id}>."
+                        "Share a star rating and optional review before this thread closes."
                     ),
                 ),
-                view=RatingView(db, trade_id, user_id, partner_id, role_value, item),
+                view=rating_view,
             )
         except discord.HTTPException:
-            _log.warning("Failed to send rating prompt to %s for trade %s", user_id, trade_id)
+            _log.warning(
+                "Failed to send in-thread rating prompt to %s for trade %s", user_id, trade_id
+            )
 
 
 class BasePersistentView(discord.ui.View):
@@ -1881,33 +1896,27 @@ class TradeThreadView(BasePersistentView):
                 guild = interaction.guild
                 reviewer_id = self.initiator_id
                 partner_id = self.buyer_id if reviewer_id == self.seller_id else self.seller_id
-                partner_member = guild.get_member(partner_id) if guild else None
-                try:
-                    await interaction.channel.remove_user(partner_member or discord.Object(id=partner_id))
-                except discord.HTTPException:
-                    _log.warning(
-                        "Failed to remove %s from trade thread %s", partner_id, interaction.channel.id
-                    )
 
                 async def finish_feedback(result_interaction: discord.Interaction) -> None:
                     if not isinstance(result_interaction.channel, discord.Thread):
                         return
 
-                    initiator_member = (
-                        result_interaction.guild.get_member(reviewer_id)
-                        if result_interaction.guild
-                        else None
-                    )
-                    try:
-                        await result_interaction.channel.remove_user(
-                            initiator_member or discord.Object(id=reviewer_id)
+                    for removal_id in (reviewer_id, partner_id):
+                        removal_member = (
+                            result_interaction.guild.get_member(removal_id)
+                            if result_interaction.guild
+                            else None
                         )
-                    except discord.HTTPException:
-                        _log.warning(
-                            "Failed to remove initiator %s from trade thread %s",
-                            reviewer_id,
-                            result_interaction.channel.id,
-                        )
+                        try:
+                            await result_interaction.channel.remove_user(
+                                removal_member or discord.Object(id=removal_id)
+                            )
+                        except discord.HTTPException:
+                            _log.warning(
+                                "Failed to remove %s from trade thread %s",
+                                removal_id,
+                                result_interaction.channel.id,
+                            )
 
                     try:
                         await result_interaction.channel.edit(archived=True, locked=True)
@@ -1956,8 +1965,8 @@ class TradeThreadView(BasePersistentView):
             embed=info_embed(
                 "✅ Trade closed",
                 (
-                    "I've removed the other participant. Please leave your rating in this "
-                    "thread to finish closing it."
+                    "Please leave your rating in this thread to finish closing it. I'll "
+                    "remove everyone once feedback is submitted."
                 ),
             ),
         )
@@ -1968,6 +1977,7 @@ class TradeThreadView(BasePersistentView):
             self.item,
             self.seller_id,
             self.buyer_id,
+            thread=interaction.channel if isinstance(interaction.channel, discord.Thread) else None,
         )
 
 
@@ -2252,7 +2262,15 @@ class TradeView(BasePersistentView):
             embed=info_embed("✅ Trade completed", f"Trade #{self.trade_id} for **{self.item}** is now complete."),
             ephemeral=True,
         )
-        await send_rating_prompts(interaction.client, self.db, self.trade_id, self.item, self.seller_id, self.buyer_id)
+        await send_rating_prompts(
+            interaction.client,
+            self.db,
+            self.trade_id,
+            self.item,
+            self.seller_id,
+            self.buyer_id,
+            thread=interaction.channel if isinstance(interaction.channel, discord.Thread) else None,
+        )
 
     @discord.ui.button(label="Cancel Trade", style=discord.ButtonStyle.danger, emoji="🛑")
     async def cancel_button(self, interaction: discord.Interaction, _: discord.ui.Button):
