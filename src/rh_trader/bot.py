@@ -737,7 +737,8 @@ class TraderBot(commands.Bot):
             "🤝 Trade room opened",
             (
                 f"<@{buyer_id}> wants to trade with <@{seller_id}> for **{item}**.\n"
-                "Use this thread to chat and press **Close Trade** when you're done."
+                "Use this thread to chat and press **Complete Trade** when you're done "
+                "or **Cancel Trade** if plans change."
             ),
         )
         view = TradeThreadView(
@@ -1862,7 +1863,29 @@ class TradeThreadView(BasePersistentView):
         self.buyer_id = buyer_id
         self.initiator_id = initiator_id
         self.item = item
-        self.close_button.custom_id = f"trade:threadclose:{trade_id}"
+        self.complete_button.custom_id = f"trade:threadcomplete:{trade_id}"
+        self.cancel_button.custom_id = f"trade:threadcancel:{trade_id}"
+
+    async def _remove_participants_and_close_thread(
+        self, thread: discord.Thread, *, reason: str
+    ) -> None:
+        for removal_id in (self.seller_id, self.buyer_id):
+            removal_member = thread.guild.get_member(removal_id) if thread.guild else None
+            try:
+                await thread.remove_user(removal_member or discord.Object(id=removal_id))
+            except discord.HTTPException:
+                _log.warning(
+                    "Failed to remove %s from trade thread %s", removal_id, thread.id
+                )
+
+        try:
+            await thread.edit(archived=True, locked=True)
+        except discord.HTTPException:
+            pass
+        try:
+            await thread.delete(reason=reason)
+        except discord.HTTPException:
+            pass
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id not in {self.seller_id, self.buyer_id} and not getattr(
@@ -1871,15 +1894,48 @@ class TradeThreadView(BasePersistentView):
             await interaction.response.send_message(
                 embed=info_embed(
                     "🚫 Not your trade",
-                    "Only the two traders or a moderator can close this thread.",
+                    "Only the two traders or a moderator can manage this trade.",
                 ),
                 ephemeral=True,
             )
             return False
         return True
 
-    @discord.ui.button(label="Close Trade", style=discord.ButtonStyle.danger, emoji="🔒")
-    async def close_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+    @discord.ui.button(label="Cancel Trade", style=discord.ButtonStyle.danger, emoji="🛑")
+    async def cancel_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        cancelled = await self.db.cancel_trade(self.trade_id)
+        if not cancelled:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "ℹ️ Trade already closed",
+                    f"Trade #{self.trade_id} is already marked finished.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        try:
+            if isinstance(interaction.channel, discord.Thread):
+                await self._remove_participants_and_close_thread(
+                    interaction.channel, reason="Trade cancelled"
+                )
+        finally:
+            self.disable_all_items()
+            try:
+                if interaction.message:
+                    await interaction.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+        await interaction.response.send_message(
+            embed=info_embed(
+                "🚫 Trade cancelled",
+                "The trade has been cancelled and the thread will be cleaned up.",
+            ),
+        )
+
+    @discord.ui.button(label="Complete Trade", style=discord.ButtonStyle.success, emoji="✅")
+    async def complete_button(self, interaction: discord.Interaction, _: discord.ui.Button):
         completed = await self.db.complete_trade(self.trade_id)
         if not completed:
             await interaction.response.send_message(
@@ -1901,31 +1957,9 @@ class TradeThreadView(BasePersistentView):
                     if not isinstance(result_interaction.channel, discord.Thread):
                         return
 
-                    for removal_id in (reviewer_id, partner_id):
-                        removal_member = (
-                            result_interaction.guild.get_member(removal_id)
-                            if result_interaction.guild
-                            else None
-                        )
-                        try:
-                            await result_interaction.channel.remove_user(
-                                removal_member or discord.Object(id=removal_id)
-                            )
-                        except discord.HTTPException:
-                            _log.warning(
-                                "Failed to remove %s from trade thread %s",
-                                removal_id,
-                                result_interaction.channel.id,
-                            )
-
-                    try:
-                        await result_interaction.channel.edit(archived=True, locked=True)
-                    except discord.HTTPException:
-                        pass
-                    try:
-                        await result_interaction.channel.delete(reason="Trade closed")
-                    except discord.HTTPException:
-                        pass
+                    await self._remove_participants_and_close_thread(
+                        result_interaction.channel, reason="Trade closed"
+                    )
 
                 prompt = info_embed(
                     "⭐ Rate your partner",
