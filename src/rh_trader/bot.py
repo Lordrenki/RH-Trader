@@ -1803,8 +1803,9 @@ async def send_rating_prompts(
     db: Database,
     trade_id: int,
     item: str,
-    seller_id: int,
-    buyer_id: int,
+    rater_id: int,
+    partner_id: int,
+    role_value: str,
     *,
     thread: discord.Thread | None,
 ) -> None:
@@ -1812,27 +1813,22 @@ async def send_rating_prompts(
         _log.warning("Skipping rating prompts for trade %s because no thread was provided", trade_id)
         return
 
-    for user_id in (seller_id, buyer_id):
-        partner_id = buyer_id if user_id == seller_id else seller_id
-        role_value = "seller" if user_id == seller_id else "buyer"
-        rating_view = RatingView(db, trade_id, user_id, partner_id, role_value, item)
-        bot.add_view(rating_view)
-        try:
-            await thread.send(
-                content=f"<@{user_id}>",
-                embed=info_embed(
-                    "⭐ Rate your partner",
-                    (
-                        f"Trade #{trade_id} for **{item}** is complete.\n"
-                        "Share a star rating and optional review before this thread closes."
-                    ),
+    rating_view = RatingView(db, trade_id, rater_id, partner_id, role_value, item)
+    bot.add_view(rating_view)
+    try:
+        await thread.send(
+            content=f"<@{rater_id}>",
+            embed=info_embed(
+                "⭐ Rate your partner",
+                (
+                    f"Trade #{trade_id} for **{item}** is complete.\n"
+                    "Share a star rating and optional review before this thread closes."
                 ),
-                view=rating_view,
-            )
-        except discord.HTTPException:
-            _log.warning(
-                "Failed to send in-thread rating prompt to %s for trade %s", user_id, trade_id
-            )
+            ),
+            view=rating_view,
+        )
+    except discord.HTTPException:
+        _log.warning("Failed to send in-thread rating prompt to %s for trade %s", rater_id, trade_id)
 
 
 class BasePersistentView(discord.ui.View):
@@ -2003,15 +1999,6 @@ class TradeThreadView(BasePersistentView):
                     "remove everyone once feedback is submitted."
                 ),
             ),
-        )
-        await send_rating_prompts(
-            interaction.client,
-            self.db,
-            self.trade_id,
-            self.item,
-            self.seller_id,
-            self.buyer_id,
-            thread=interaction.channel if isinstance(interaction.channel, discord.Thread) else None,
         )
 
 
@@ -2185,6 +2172,7 @@ class TradeView(BasePersistentView):
         *,
         is_seller: bool,
         status: str = "pending",
+        initiator_id: int | None = None,
     ):
         super().__init__()
         self.db = db
@@ -2193,6 +2181,7 @@ class TradeView(BasePersistentView):
         self.buyer_id = buyer_id
         self.item = item
         self.is_seller = is_seller
+        self.initiator_id = initiator_id or buyer_id
         self.status = status
         role_label = "seller" if is_seller else "buyer"
         base_custom_id = f"trade:{trade_id}:{role_label}"
@@ -2296,13 +2285,17 @@ class TradeView(BasePersistentView):
             embed=info_embed("✅ Trade completed", f"Trade #{self.trade_id} for **{self.item}** is now complete."),
             ephemeral=True,
         )
+        rater_id = self.initiator_id
+        partner_id = self.buyer_id if rater_id == self.seller_id else self.seller_id
+        role_value = "seller" if rater_id == self.seller_id else "buyer"
         await send_rating_prompts(
             interaction.client,
             self.db,
             self.trade_id,
             self.item,
-            self.seller_id,
-            self.buyer_id,
+            rater_id,
+            partner_id,
+            role_value,
             thread=interaction.channel if isinstance(interaction.channel, discord.Thread) else None,
         )
 
@@ -2400,6 +2393,7 @@ class TradeView(BasePersistentView):
                     self.item,
                     is_seller=False,
                     status="open",
+                    initiator_id=self.buyer_id,
                 ),
             )
         except discord.HTTPException:
