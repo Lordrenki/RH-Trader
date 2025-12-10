@@ -1,6 +1,7 @@
 """Discord bot entrypoint and command registration."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -33,7 +34,7 @@ DEFAULT_EMBED_COLOR = 0x2B2D31
 PREMIUM_EMBED_COLOR = 0xFFD700
 EMBED_FIELD_CHAR_LIMIT = 1000
 REVIEW_CHAR_LIMIT = 300
-TRADE_THREAD_CHANNEL_ID = 1_440_070_937_457_201_345
+BROADCASTER_IDS = {1_395_110_823_898_255_442}
 PREMIUM_BADGE_URL = (
     "https://cdn.discordapp.com/attachments/1431560702518104175/1447739322022498364/"
     "discotools-xyz-icon.png?ex=6938b7d0&is=69376650&hm=bd0daea439bc5d7622d4b7008ba08ba8f5e44f30a79394a23dd58f5f5a07a3e6"
@@ -318,9 +319,19 @@ class TraderBot(commands.Bot):
         self.wishlist_actions = WishlistGroup(self.db)
         self.alert_actions = AlertGroup(self.db, self._alert_limit)
         self.trade_actions = TradeGroup(self.db)
+        self._broadcaster_ids: set[int] = set()
+
+    async def _refresh_broadcaster_ids(self) -> None:
+        """Load the IDs allowed to broadcast DMs."""
+
+        self._broadcaster_ids = set(BROADCASTER_IDS)
+
+    def _can_broadcast_dm(self, user_id: int) -> bool:
+        return user_id in self._broadcaster_ids if self._broadcaster_ids else False
 
     async def setup_hook(self) -> None:
         await self.db.setup()
+        await self._refresh_broadcaster_ids()
         self.tree.add_command(self.stock_actions)
         self.tree.add_command(self.wishlist_actions)
         self.tree.add_command(self.alert_actions)
@@ -693,6 +704,54 @@ class TraderBot(commands.Bot):
         ):
             await self._handle_store_post(interaction, image)
 
+        @self.tree.command(
+            description="Send a markdown announcement to everyone who has used the bot"
+        )
+        @app_commands.describe(message="Markdown content to send in the DM")
+        async def broadcast_dm(
+            interaction: discord.Interaction, message: app_commands.Range[str, 1, 1800]
+        ):
+            if not self._can_broadcast_dm(interaction.user.id):
+                await interaction.response.send_message(
+                    embed=info_embed(
+                        "🚫 Unauthorized",
+                        "Only the bot owner can broadcast DMs.",
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            await interaction.response.defer(ephemeral=True, thinking=True)
+
+            user_ids = await db.list_known_users()
+            sent = 0
+            failed = 0
+
+            for user_id in user_ids:
+                try:
+                    user = self.get_user(user_id) or await self.fetch_user(user_id)
+                except discord.HTTPException:
+                    failed += 1
+                    continue
+
+                try:
+                    await user.send(
+                        message, allowed_mentions=discord.AllowedMentions.none()
+                    )
+                except (discord.Forbidden, discord.HTTPException):
+                    failed += 1
+                else:
+                    sent += 1
+                    await asyncio.sleep(0.2)
+
+            await interaction.followup.send(
+                embed=info_embed(
+                    "📣 DM broadcast finished",
+                    f"Delivered to {sent} user(s). {failed} could not be reached.",
+                ),
+                ephemeral=True,
+            )
+
     def _has_store_premium(
         self, interaction: discord.Interaction
     ) -> StoreTierBenefits | None:
@@ -745,7 +804,14 @@ class TraderBot(commands.Bot):
 
         channel_id = await self.db.get_trade_thread_channel(interaction.guild.id)
         if channel_id is None:
-            channel_id = TRADE_THREAD_CHANNEL_ID
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "🚫 Thread channel missing",
+                    "An admin needs to run /set_trade_thread_channel to choose where trade threads start.",
+                ),
+                ephemeral=True,
+            )
+            return
 
         channel = self.get_channel(channel_id)
         if channel is None:
