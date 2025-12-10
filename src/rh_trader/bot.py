@@ -27,7 +27,8 @@ _log = logging.getLogger(__name__)
 QUICK_RATING_COOLDOWN_SECONDS = 24 * 60 * 60
 STORE_POST_WINDOW_SECONDS = 60 * 60
 DEFAULT_STORE_POST_LIMIT = 1
-DEFAULT_STORE_LISTING_LIMIT = 10
+DEFAULT_STORE_LISTING_LIMIT = 20
+PREMIUM_STORE_LISTING_LIMIT = 50
 DEFAULT_EMBED_COLOR = 0x2B2D31
 PREMIUM_EMBED_COLOR = 0xFFD700
 EMBED_FIELD_CHAR_LIMIT = 1000
@@ -147,6 +148,12 @@ def _paginate_field_entries(entries: list, formatter, per_page: int) -> list[str
     return pages
 
 
+def _store_listing_limit_for_tier(tier: StoreTierBenefits | None) -> int:
+    """Return the applicable listing limit for store and inventory entries."""
+
+    return PREMIUM_STORE_LISTING_LIMIT if tier else DEFAULT_STORE_LISTING_LIMIT
+
+
 def _listing_limit_for_interaction(interaction: discord.Interaction) -> int:
     """Return how many stock/wishlist entries a user may store."""
 
@@ -154,7 +161,7 @@ def _listing_limit_for_interaction(interaction: discord.Interaction) -> int:
     has_premium = getattr(client, "_has_store_premium", None)
     tier = has_premium(interaction) if callable(has_premium) else None
 
-    return tier.listing_limit if tier else DEFAULT_STORE_LISTING_LIMIT
+    return _store_listing_limit_for_tier(tier)
 
 
 async def _enforce_listing_limit(
@@ -333,26 +340,37 @@ class TraderBot(commands.Bot):
                 display_name = f"User {user_id}"
                 avatar_url = None
 
+            premium_flag = bool(is_premium)
+            effective_listing_limit = max(
+                1,
+                listing_limit
+                or (
+                    PREMIUM_STORE_LISTING_LIMIT
+                    if premium_flag
+                    else DEFAULT_STORE_LISTING_LIMIT
+                ),
+            )
+
             embeds = await build_store_embeds(
                 self,
                 self.db,
                 user_id,
                 display_name,
                 avatar_url=avatar_url,
-                listing_limit=listing_limit or DEFAULT_STORE_LISTING_LIMIT,
+                listing_limit=effective_listing_limit,
                 store_tier_name=tier_name or None,
-                is_premium=bool(is_premium),
-                badge_url=PREMIUM_BADGE_URL if is_premium else None,
+                is_premium=premium_flag,
+                badge_url=PREMIUM_BADGE_URL if premium_flag else None,
                 image_url=image_url or None,
             )
 
             view = StorePostView(
                 self.db,
                 user_id,
-                listing_limit=listing_limit or DEFAULT_STORE_LISTING_LIMIT,
+                listing_limit=effective_listing_limit,
                 store_tier_name=tier_name or None,
-                is_premium=bool(is_premium),
-                badge_url=PREMIUM_BADGE_URL if is_premium else None,
+                is_premium=premium_flag,
+                badge_url=PREMIUM_BADGE_URL if premium_flag else None,
                 image_url=image_url or None,
             )
             view.set_page_count(len(embeds))
@@ -848,9 +866,7 @@ class TraderBot(commands.Bot):
             )
             return
 
-        listing_limit = (
-            store_tier.listing_limit if store_tier else DEFAULT_STORE_LISTING_LIMIT
-        )
+        listing_limit = _store_listing_limit_for_tier(store_tier)
         badge_url = PREMIUM_BADGE_URL if store_tier else None
         image_url = image.url if image else None
         stock = await db.get_stock(interaction.user.id)
@@ -999,8 +1015,13 @@ class TraderBot(commands.Bot):
             )
             return
 
-        listing_limit = max(1, listing_limit or DEFAULT_STORE_LISTING_LIMIT)
-        badge_url = PREMIUM_BADGE_URL if is_premium else None
+        premium_flag = bool(is_premium)
+        listing_limit = max(
+            1,
+            listing_limit,
+            PREMIUM_STORE_LISTING_LIMIT if premium_flag else DEFAULT_STORE_LISTING_LIMIT,
+        )
+        badge_url = PREMIUM_BADGE_URL if premium_flag else None
         embeds = await build_store_embeds(
             interaction.client,
             self.db,
@@ -1009,7 +1030,7 @@ class TraderBot(commands.Bot):
             avatar_url=interaction.user.display_avatar.url,
             listing_limit=listing_limit,
             store_tier_name=store_tier_name or None,
-            is_premium=bool(is_premium),
+            is_premium=premium_flag,
             badge_url=badge_url,
             image_url=image_url or None,
         )
@@ -1020,7 +1041,7 @@ class TraderBot(commands.Bot):
             interaction.user.display_name,
             listing_limit=listing_limit,
             store_tier_name=store_tier_name or None,
-            is_premium=bool(is_premium),
+            is_premium=premium_flag,
             badge_url=badge_url,
             image_url=image_url or None,
         )
