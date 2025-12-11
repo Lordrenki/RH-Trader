@@ -1991,6 +1991,13 @@ class TradeThreadView(BasePersistentView):
             )
             return
 
+        await interaction.response.send_message(
+            embed=info_embed(
+                "🚫 Trade cancelled",
+                "The trade has been cancelled and the thread will be cleaned up.",
+            ),
+        )
+
         try:
             if isinstance(interaction.channel, discord.Thread):
                 await self._remove_participants_and_close_thread(
@@ -2003,13 +2010,6 @@ class TradeThreadView(BasePersistentView):
                     await interaction.message.edit(view=self)
             except discord.HTTPException:
                 pass
-
-        await interaction.response.send_message(
-            embed=info_embed(
-                "🚫 Trade cancelled",
-                "The trade has been cancelled and the thread will be cleaned up.",
-            ),
-        )
 
     @discord.ui.button(label="Complete Trade", style=discord.ButtonStyle.success, emoji="✅")
     async def complete_button(self, interaction: discord.Interaction, _: discord.ui.Button):
