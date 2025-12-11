@@ -869,8 +869,11 @@ class TraderBot(commands.Bot):
         item: str,
         initiator_id: int,
     ) -> None:
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True, thinking=True)
+
         if interaction.guild is None:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=info_embed(
                     "🌐 Guild only",
                     "Trade threads can only be created inside a server.",
@@ -898,7 +901,7 @@ class TraderBot(commands.Bot):
                 channel = None
 
         if not isinstance(channel, discord.TextChannel):
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=info_embed(
                     "🚫 Thread channel missing",
                     "I can't access the configured trade thread channel. Please double-check it.",
@@ -923,7 +926,7 @@ class TraderBot(commands.Bot):
                 reason="New trade initiated",
             )
         except discord.HTTPException:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=info_embed(
                     "❌ Could not create thread",
                     f"I couldn't start a trade thread in {channel.mention}.",
@@ -978,7 +981,7 @@ class TraderBot(commands.Bot):
                 "and that I have permission to manage private threads there."
             )
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             embed=info_embed("✅ Trade thread ready", description),
             ephemeral=True,
         )
@@ -2323,8 +2326,10 @@ class StorePostView(BasePersistentView):
 
     @discord.ui.button(label="Contact Seller", style=discord.ButtonStyle.primary, emoji="🤝")
     async def start_trade(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
         if interaction.user.id == self.poster_id:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=info_embed("⚠️ Invalid trade", "You cannot start a trade with yourself."),
                 ephemeral=True,
             )
@@ -2332,7 +2337,7 @@ class StorePostView(BasePersistentView):
 
         bot = getattr(interaction, "client", None)
         if not isinstance(bot, TraderBot):
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=info_embed(
                     "🚫 Unsupported action", "Please start this trade with the main trader bot."
                 ),
