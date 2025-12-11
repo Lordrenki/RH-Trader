@@ -75,7 +75,10 @@ class Database:
                     created_at INTEGER DEFAULT 0,
                     accepted_at INTEGER,
                     closed_at INTEGER,
-                    response_recorded INTEGER DEFAULT 0
+                    response_recorded INTEGER DEFAULT 0,
+                    thread_id INTEGER,
+                    last_activity_at INTEGER,
+                    inactivity_warning_sent INTEGER DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS trade_feedback (
@@ -180,6 +183,21 @@ class Database:
             await db.execute(
                 "ALTER TABLE trades ADD COLUMN response_recorded INTEGER DEFAULT 0"
             )
+        if "thread_id" not in columns:
+            await db.execute("ALTER TABLE trades ADD COLUMN thread_id INTEGER")
+        if "last_activity_at" not in columns:
+            await db.execute("ALTER TABLE trades ADD COLUMN last_activity_at INTEGER")
+        if "inactivity_warning_sent" not in columns:
+            await db.execute(
+                "ALTER TABLE trades ADD COLUMN inactivity_warning_sent INTEGER DEFAULT 0"
+            )
+        await db.execute(
+            "UPDATE trades SET last_activity_at = COALESCE(NULLIF(last_activity_at, 0), CASE WHEN created_at > 0 THEN created_at ELSE ? END)",
+            (int(time.time()),),
+        )
+        await db.execute(
+            "UPDATE trades SET inactivity_warning_sent = COALESCE(inactivity_warning_sent, 0)"
+        )
         await db.commit()
 
     async def _ensure_user_columns(self, db: aiosqlite.Connection) -> None:
@@ -617,21 +635,25 @@ class Database:
             (trade_id,),
         )
 
-    async def create_trade(self, seller_id: int, buyer_id: int, item: str) -> int:
+    async def create_trade(
+        self, seller_id: int, buyer_id: int, item: str, *, thread_id: int | None = None
+    ) -> int:
         await self.ensure_user(seller_id)
         await self.ensure_user(buyer_id)
         async with self._lock:
             async with self._connect() as db:
                 now_ts = int(time.time())
                 cursor = await db.execute(
-                    "INSERT INTO trades(user_id, partner_id, item, status, seller_id, buyer_id, created_at)\n"
-                    "VALUES (?, ?, ?, 'pending', ?, ?, ?)",
+                    "INSERT INTO trades(user_id, partner_id, item, status, seller_id, buyer_id, created_at, thread_id, last_activity_at)\n"
+                    "VALUES (?, ?, ?, 'pending', ?, ?, ?, ?, ?)",
                     (
                         seller_id,
                         buyer_id,
                         item.strip(),
                         seller_id,
                         buyer_id,
+                        now_ts,
+                        thread_id,
                         now_ts,
                     ),
                 )
@@ -731,6 +753,51 @@ class Database:
                     await self._record_response_for_trade(db, trade_id)
                 await db.commit()
                 return cursor.rowcount > 0
+
+    async def attach_trade_thread(
+        self, trade_id: int, thread_id: int, *, timestamp: Optional[int] = None
+    ) -> None:
+        async with self._lock:
+            async with self._connect() as db:
+                ts = timestamp or int(time.time())
+                await db.execute(
+                    "UPDATE trades SET thread_id = ?, last_activity_at = ?, inactivity_warning_sent = 0 WHERE id = ?",
+                    (thread_id, ts, trade_id),
+                )
+                await db.commit()
+
+    async def record_trade_activity(
+        self, thread_id: int, *, timestamp: Optional[int] = None
+    ) -> None:
+        async with self._lock:
+            async with self._connect() as db:
+                ts = timestamp or int(time.time())
+                await db.execute(
+                    "UPDATE trades SET last_activity_at = ?, inactivity_warning_sent = 0\n"
+                    "WHERE thread_id = ? AND status IN ('open', 'pending')",
+                    (ts, thread_id),
+                )
+                await db.commit()
+
+    async def list_active_trade_threads(
+        self,
+    ) -> list[tuple[int, int, int, int, str, int, int]]:
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "SELECT id, thread_id, seller_id, buyer_id, item, last_activity_at, inactivity_warning_sent\n"
+                "FROM trades WHERE status IN ('open', 'pending') AND thread_id IS NOT NULL",
+            )
+            rows = await cursor.fetchall()
+            return [tuple(row) for row in rows]
+
+    async def mark_inactivity_warning_sent(self, trade_id: int) -> None:
+        async with self._lock:
+            async with self._connect() as db:
+                await db.execute(
+                    "UPDATE trades SET inactivity_warning_sent = 1 WHERE id = ?",
+                    (trade_id,),
+                )
+                await db.commit()
 
     async def get_trade(self, trade_id: int) -> Tuple[int, int, int, str, str] | None:
         async with self._connect() as db:
