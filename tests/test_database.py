@@ -180,6 +180,31 @@ async def test_trade_flow(tmp_path: Path):
     assert trades[0][10] == 1  # response_recorded flag set
 
 
+async def test_trade_thread_inactivity_tracking(tmp_path: Path):
+    db = await init_db(tmp_path)
+
+    trade_id = await db.create_trade(1, 2, "Widget", thread_id=111)
+    await db.accept_trade(trade_id, 1)
+
+    trades = await db.list_active_trade_threads()
+    assert trades[0][:5] == (trade_id, 111, 1, 2, "Widget")
+    assert trades[0][6] == 0
+
+    await db.mark_inactivity_warning_sent(trade_id)
+    trades = await db.list_active_trade_threads()
+    assert trades[0][6] == 1
+
+    await db.record_trade_activity(111, timestamp=50)
+    trades = await db.list_active_trade_threads()
+    assert trades[0][5] == 50
+    assert trades[0][6] == 0
+
+    await db.attach_trade_thread(trade_id, 222, timestamp=75)
+    trades = await db.list_active_trade_threads()
+    assert trades[0][1] == 222
+    assert trades[0][5] == 75
+
+
 async def test_trade_reviews(tmp_path: Path):
     db = await init_db(tmp_path)
     trade_id = await db.create_trade(5, 6, "Rare Item")

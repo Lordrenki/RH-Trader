@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from dataclasses import dataclass
@@ -34,6 +35,8 @@ DEFAULT_EMBED_COLOR = 0x2B2D31
 PREMIUM_EMBED_COLOR = 0xFFD700
 EMBED_FIELD_CHAR_LIMIT = 1000
 REVIEW_CHAR_LIMIT = 300
+TRADE_INACTIVITY_WARNING_SECONDS = 12 * 60 * 60
+TRADE_INACTIVITY_CLOSE_SECONDS = 24 * 60 * 60
 PREMIUM_BADGE_URL = (
     "https://cdn.discordapp.com/attachments/1431560702518104175/1447739322022498364/"
     "discotools-xyz-icon.png?ex=6938b7d0&is=69376650&hm=bd0daea439bc5d7622d4b7008ba08ba8f5e44f30a79394a23dd58f5f5a07a3e6"
@@ -199,6 +202,26 @@ async def _send_interaction_message(
     await interaction.response.send_message(**kwargs)
 
 
+async def _remove_participants_and_close_thread(
+    thread: discord.Thread, seller_id: int, buyer_id: int, *, reason: str
+) -> None:
+    for removal_id in (seller_id, buyer_id):
+        removal_member = thread.guild.get_member(removal_id) if thread.guild else None
+        try:
+            await thread.remove_user(removal_member or discord.Object(id=removal_id))
+        except discord.HTTPException:
+            _log.warning("Failed to remove %s from trade thread %s", removal_id, thread.id)
+
+    try:
+        await thread.edit(archived=True, locked=True)
+    except discord.HTTPException:
+        pass
+    try:
+        await thread.delete(reason=reason)
+    except discord.HTTPException:
+        pass
+
+
 async def _lookup_display_name(client: discord.Client, user_id: int) -> str:
     user = client.get_user(user_id)
     if user is None:
@@ -318,6 +341,7 @@ class TraderBot(commands.Bot):
         self.wishlist_actions = WishlistGroup(self.db)
         self.alert_actions = AlertGroup(self.db, self._alert_limit)
         self.trade_actions = TradeGroup(self.db)
+        self._inactivity_task: asyncio.Task | None = None
 
     async def setup_hook(self) -> None:
         await self.db.setup()
@@ -329,6 +353,7 @@ class TraderBot(commands.Bot):
         await self.register_persistent_views()
         await self.tree.sync()
         _log.info("Slash commands synced")
+        self._inactivity_task = self.loop.create_task(self._inactivity_watcher())
 
     async def register_persistent_views(self) -> None:
         for _, user_id, _, _, listing_limit, tier_name, is_premium, image_url in await self.db.list_trade_posts():
@@ -378,7 +403,17 @@ class TraderBot(commands.Bot):
 
     async def close(self) -> None:
         await self.catalog.close()
+        if self._inactivity_task:
+            self._inactivity_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._inactivity_task
         await super().close()
+
+    async def on_message(self, message: discord.Message) -> None:
+        if isinstance(message.channel, discord.Thread):
+            await self.db.record_trade_activity(message.channel.id)
+
+        await super().on_message(message)
 
     async def add_misc_commands(self) -> None:
         db = self.db
@@ -467,6 +502,105 @@ class TraderBot(commands.Bot):
                     users=True, roles=False, everyone=False, replied_user=False
                 ),
             )
+
+    async def _inactivity_watcher(self) -> None:
+        await self.wait_until_ready()
+        try:
+            while not self.is_closed():
+                try:
+                    await self._process_inactive_threads()
+                except Exception:
+                    _log.exception("Error while monitoring inactive trade threads")
+                await asyncio.sleep(300)
+        except asyncio.CancelledError:
+            return
+
+    async def _process_inactive_threads(self) -> None:
+        now = int(time.time())
+        warning_cutoff = now - TRADE_INACTIVITY_WARNING_SECONDS
+        close_cutoff = now - TRADE_INACTIVITY_CLOSE_SECONDS
+        trades = await self.db.list_active_trade_threads()
+
+        for (
+            trade_id,
+            thread_id,
+            seller_id,
+            buyer_id,
+            _item,
+            last_activity,
+            warning_sent,
+        ) in trades:
+            if last_activity is None:
+                continue
+
+            thread = self.get_channel(thread_id)
+            if thread is None:
+                try:
+                    thread = await self.fetch_channel(thread_id)
+                except discord.HTTPException:
+                    thread = None
+
+            if not isinstance(thread, discord.Thread):
+                continue
+
+            if last_activity <= close_cutoff:
+                message = info_embed(
+                    "⌛ Trade cancelled",
+                    (
+                        "This trade thread was closed after 24 hours without activity.\n"
+                        "The trade has been cancelled and the thread will be cleaned up."
+                    ),
+                )
+                try:
+                    await thread.send(
+                        content=f"<@{seller_id}> <@{buyer_id}>",
+                        embed=message,
+                        allowed_mentions=discord.AllowedMentions(
+                            users=True, roles=False, everyone=False, replied_user=False
+                        ),
+                    )
+                except discord.HTTPException:
+                    _log.warning(
+                        "Failed to notify trade %s about inactivity closure", trade_id
+                    )
+
+                await self.db.cancel_trade(trade_id)
+                await self.db.clear_active_trade(seller_id, trade_id)
+                await self.db.clear_active_trade(buyer_id, trade_id)
+                await _remove_participants_and_close_thread(
+                    thread,
+                    seller_id,
+                    buyer_id,
+                    reason="Trade inactive for 24 hours",
+                )
+                continue
+
+            if warning_sent:
+                continue
+
+            if last_activity <= warning_cutoff:
+                warning_embed = info_embed(
+                    "⏳ Inactivity warning",
+                    (
+                        "No one has spoken in this trade thread for 12 hours."
+                        " I'll cancel the trade and close the thread after another 12 hours"
+                        " of inactivity."
+                    ),
+                )
+                try:
+                    await thread.send(
+                        content=f"<@{seller_id}> <@{buyer_id}>",
+                        embed=warning_embed,
+                        allowed_mentions=discord.AllowedMentions(
+                            users=True, roles=False, everyone=False, replied_user=False
+                        ),
+                    )
+                except discord.HTTPException:
+                    _log.warning(
+                        "Failed to send inactivity warning for trade %s", trade_id
+                    )
+
+                await self.db.mark_inactivity_warning_sent(trade_id)
 
         @self.tree.command(name="store", description="Open a quick trading control panel")
         async def store(interaction: discord.Interaction):
@@ -806,7 +940,7 @@ class TraderBot(commands.Bot):
                 )
                 failed_additions.append(member.id)
 
-        trade_id = await self.db.create_trade(seller_id, buyer_id, item)
+        trade_id = await self.db.create_trade(seller_id, buyer_id, item, thread_id=thread.id)
         await self.db.accept_trade(trade_id, seller_id)
 
         intro = info_embed(
@@ -1946,23 +2080,9 @@ class TradeThreadView(BasePersistentView):
     async def _remove_participants_and_close_thread(
         self, thread: discord.Thread, *, reason: str
     ) -> None:
-        for removal_id in (self.seller_id, self.buyer_id):
-            removal_member = thread.guild.get_member(removal_id) if thread.guild else None
-            try:
-                await thread.remove_user(removal_member or discord.Object(id=removal_id))
-            except discord.HTTPException:
-                _log.warning(
-                    "Failed to remove %s from trade thread %s", removal_id, thread.id
-                )
-
-        try:
-            await thread.edit(archived=True, locked=True)
-        except discord.HTTPException:
-            pass
-        try:
-            await thread.delete(reason=reason)
-        except discord.HTTPException:
-            pass
+        await _remove_participants_and_close_thread(
+            thread, self.seller_id, self.buyer_id, reason=reason
+        )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id not in {self.seller_id, self.buyer_id} and not getattr(
