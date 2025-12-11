@@ -415,8 +415,10 @@ class TraderBot(commands.Bot):
 
         await super().on_message(message)
 
+
     async def add_misc_commands(self) -> None:
         db = self.db
+
         @self.tree.command(description="Search community inventories or wishlists for an item")
         @app_commands.describe(
             item="Keyword to search for",
@@ -502,105 +504,6 @@ class TraderBot(commands.Bot):
                     users=True, roles=False, everyone=False, replied_user=False
                 ),
             )
-
-    async def _inactivity_watcher(self) -> None:
-        await self.wait_until_ready()
-        try:
-            while not self.is_closed():
-                try:
-                    await self._process_inactive_threads()
-                except Exception:
-                    _log.exception("Error while monitoring inactive trade threads")
-                await asyncio.sleep(300)
-        except asyncio.CancelledError:
-            return
-
-    async def _process_inactive_threads(self) -> None:
-        now = int(time.time())
-        warning_cutoff = now - TRADE_INACTIVITY_WARNING_SECONDS
-        close_cutoff = now - TRADE_INACTIVITY_CLOSE_SECONDS
-        trades = await self.db.list_active_trade_threads()
-
-        for (
-            trade_id,
-            thread_id,
-            seller_id,
-            buyer_id,
-            _item,
-            last_activity,
-            warning_sent,
-        ) in trades:
-            if last_activity is None:
-                continue
-
-            thread = self.get_channel(thread_id)
-            if thread is None:
-                try:
-                    thread = await self.fetch_channel(thread_id)
-                except discord.HTTPException:
-                    thread = None
-
-            if not isinstance(thread, discord.Thread):
-                continue
-
-            if last_activity <= close_cutoff:
-                message = info_embed(
-                    "⌛ Trade cancelled",
-                    (
-                        "This trade thread was closed after 24 hours without activity.\n"
-                        "The trade has been cancelled and the thread will be cleaned up."
-                    ),
-                )
-                try:
-                    await thread.send(
-                        content=f"<@{seller_id}> <@{buyer_id}>",
-                        embed=message,
-                        allowed_mentions=discord.AllowedMentions(
-                            users=True, roles=False, everyone=False, replied_user=False
-                        ),
-                    )
-                except discord.HTTPException:
-                    _log.warning(
-                        "Failed to notify trade %s about inactivity closure", trade_id
-                    )
-
-                await self.db.cancel_trade(trade_id)
-                await self.db.clear_active_trade(seller_id, trade_id)
-                await self.db.clear_active_trade(buyer_id, trade_id)
-                await _remove_participants_and_close_thread(
-                    thread,
-                    seller_id,
-                    buyer_id,
-                    reason="Trade inactive for 24 hours",
-                )
-                continue
-
-            if warning_sent:
-                continue
-
-            if last_activity <= warning_cutoff:
-                warning_embed = info_embed(
-                    "⏳ Inactivity warning",
-                    (
-                        "No one has spoken in this trade thread for 12 hours."
-                        " I'll cancel the trade and close the thread after another 12 hours"
-                        " of inactivity."
-                    ),
-                )
-                try:
-                    await thread.send(
-                        content=f"<@{seller_id}> <@{buyer_id}>",
-                        embed=warning_embed,
-                        allowed_mentions=discord.AllowedMentions(
-                            users=True, roles=False, everyone=False, replied_user=False
-                        ),
-                    )
-                except discord.HTTPException:
-                    _log.warning(
-                        "Failed to send inactivity warning for trade %s", trade_id
-                    )
-
-                await self.db.mark_inactivity_warning_sent(trade_id)
 
         @self.tree.command(name="store", description="Open a quick trading control panel")
         async def store(interaction: discord.Interaction):
@@ -826,6 +729,105 @@ class TraderBot(commands.Bot):
             interaction: discord.Interaction, image: Optional[discord.Attachment] = None
         ):
             await self._handle_store_post(interaction, image)
+
+    async def _inactivity_watcher(self) -> None:
+        await self.wait_until_ready()
+        try:
+            while not self.is_closed():
+                try:
+                    await self._process_inactive_threads()
+                except Exception:
+                    _log.exception("Error while monitoring inactive trade threads")
+                await asyncio.sleep(300)
+        except asyncio.CancelledError:
+            return
+
+    async def _process_inactive_threads(self) -> None:
+        now = int(time.time())
+        warning_cutoff = now - TRADE_INACTIVITY_WARNING_SECONDS
+        close_cutoff = now - TRADE_INACTIVITY_CLOSE_SECONDS
+        trades = await self.db.list_active_trade_threads()
+
+        for (
+            trade_id,
+            thread_id,
+            seller_id,
+            buyer_id,
+            _item,
+            last_activity,
+            warning_sent,
+        ) in trades:
+            if last_activity is None:
+                continue
+
+            thread = self.get_channel(thread_id)
+            if thread is None:
+                try:
+                    thread = await self.fetch_channel(thread_id)
+                except discord.HTTPException:
+                    thread = None
+
+            if not isinstance(thread, discord.Thread):
+                continue
+
+            if last_activity <= close_cutoff:
+                message = info_embed(
+                    "⌛ Trade cancelled",
+                    (
+                        "This trade thread was closed after 24 hours without activity.\n"
+                        "The trade has been cancelled and the thread will be cleaned up."
+                    ),
+                )
+                try:
+                    await thread.send(
+                        content=f"<@{seller_id}> <@{buyer_id}>",
+                        embed=message,
+                        allowed_mentions=discord.AllowedMentions(
+                            users=True, roles=False, everyone=False, replied_user=False
+                        ),
+                    )
+                except discord.HTTPException:
+                    _log.warning(
+                        "Failed to notify trade %s about inactivity closure", trade_id
+                    )
+
+                await self.db.cancel_trade(trade_id)
+                await self.db.clear_active_trade(seller_id, trade_id)
+                await self.db.clear_active_trade(buyer_id, trade_id)
+                await _remove_participants_and_close_thread(
+                    thread,
+                    seller_id,
+                    buyer_id,
+                    reason="Trade inactive for 24 hours",
+                )
+                continue
+
+            if warning_sent:
+                continue
+
+            if last_activity <= warning_cutoff:
+                warning_embed = info_embed(
+                    "⏳ Inactivity warning",
+                    (
+                        "No one has spoken in this trade thread for 12 hours."
+                        " I'll cancel the trade and close the thread after another 12 hours"
+                        " of inactivity."
+                    ),
+                )
+                try:
+                    await thread.send(
+                        content=f"<@{seller_id}> <@{buyer_id}>",
+                        embed=warning_embed,
+                        allowed_mentions=discord.AllowedMentions(
+                            users=True, roles=False, everyone=False, replied_user=False
+                        ),
+                    )
+                except discord.HTTPException:
+                    _log.warning(
+                        "Failed to send inactivity warning for trade %s", trade_id
+                    )
+
+                await self.db.mark_inactivity_warning_sent(trade_id)
 
     def _has_store_premium(
         self, interaction: discord.Interaction
