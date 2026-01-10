@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import re
 import logging
 import time
 from dataclasses import dataclass
@@ -340,7 +341,6 @@ class TraderBot(commands.Bot):
         self.stock_actions = StockGroup(self.db)
         self.wishlist_actions = WishlistGroup(self.db)
         self.alert_actions = AlertGroup(self.db, self._alert_limit)
-        self.trade_actions = TradeGroup(self.db)
         self._inactivity_task: asyncio.Task | None = None
 
     async def setup_hook(self) -> None:
@@ -348,7 +348,6 @@ class TraderBot(commands.Bot):
         self.tree.add_command(self.stock_actions)
         self.tree.add_command(self.wishlist_actions)
         self.tree.add_command(self.alert_actions)
-        self.tree.add_command(self.trade_actions)
         await self.add_misc_commands()
         await self.register_persistent_views()
         await self.tree.sync()
@@ -413,11 +412,101 @@ class TraderBot(commands.Bot):
         if isinstance(message.channel, discord.Thread):
             await self.db.record_trade_activity(message.channel.id)
 
+        if not message.author.bot:
+            await self._maybe_handle_message_rep(message)
+
         await super().on_message(message)
 
+    async def _maybe_handle_message_rep(self, message: discord.Message) -> None:
+        if message.guild is None:
+            return
+
+        match = re.match(r"^([+-])rep\s+<@!?(\d+)>", message.content.strip(), re.IGNORECASE)
+        if not match:
+            return
+
+        sign, target_id_label = match.groups()
+        target_id = int(target_id_label)
+        if target_id == message.author.id:
+            await message.channel.send(
+                embed=info_embed("🚫 Invalid target", "You cannot give rep to yourself.")
+            )
+            return
+
+        score = 5 if sign == "+" else 1
+        recorded, retry_after = await self.db.record_quick_rating(
+            message.author.id,
+            target_id,
+            score,
+            QUICK_RATING_COOLDOWN_SECONDS,
+        )
+        if not recorded:
+            wait_label = _format_duration(int(retry_after or 0))
+            await message.channel.send(
+                embed=info_embed(
+                    "⏳ On cooldown",
+                    f"You recently rated <@{target_id}>. You can send another rep in {wait_label}.",
+                )
+            )
+            return
+
+        (
+            _,
+            avg_score,
+            rating_count,
+            response_score,
+            response_count,
+            *_,
+            stored_premium,
+        ) = await self.db.profile(target_id)
+        premium_flag = bool(stored_premium)
+        action_label = "+rep" if sign == "+" else "-rep"
+        await message.channel.send(
+            embed=info_embed(
+                "⭐ Rep updated",
+                (
+                    f"You sent {action_label} to <@{target_id}>.\n"
+                    f"Their profile now shows: {rating_summary(avg_score, rating_count, premium_boost=premium_flag)}"
+                    f" • {response_summary(response_score, response_count, premium_boost=premium_flag)}"
+                ),
+            )
+        )
 
     async def add_misc_commands(self) -> None:
         db = self.db
+
+        @self.tree.command(name="rep", description="Check someone's rep summary")
+        @app_commands.describe(user="Member you want to check")
+        async def rep(
+            interaction: discord.Interaction, user: Optional[discord.User] = None
+        ):
+            target = user or interaction.user
+            if not _can_view_other(interaction, target):
+                await interaction.response.send_message(
+                    embed=info_embed("🚫 Permission denied", "You can only view your own rep."),
+                    ephemeral=True,
+                )
+                return
+
+            (
+                _,
+                avg_score,
+                rating_count,
+                response_score,
+                response_count,
+                *_,
+                stored_premium,
+            ) = await db.profile(target.id)
+            premium_flag = bool(stored_premium)
+            await interaction.response.send_message(
+                embed=info_embed(
+                    f"⭐ Rep for {target.display_name}",
+                    (
+                        f"{rating_summary(avg_score, rating_count, premium_boost=premium_flag)}"
+                        f" • {response_summary(response_score, response_count, premium_boost=premium_flag)}"
+                    ),
+                )
+            )
 
         @self.tree.command(description="Search community inventories or wishlists for an item")
         @app_commands.describe(
@@ -1488,72 +1577,6 @@ class StockGroup(app_commands.Group):
     @app_commands.command(name="clear", description="Clear all items from your stock list")
     async def clear(self, interaction: discord.Interaction):
         await self.clear_list(interaction)
-
-
-class TradeGroup(app_commands.Group):
-    def __init__(self, db: Database):
-        super().__init__(name="trade", description="Manage trades and ratings")
-        self.db = db
-
-    @app_commands.command(
-        name="rep", description="Give someone a quick star rating outside a trade"
-    )
-    @app_commands.describe(
-        user="Member you want to rate", score="Number of stars to award (1-5)"
-    )
-    async def rep(
-        self,
-        interaction: discord.Interaction,
-        user: discord.Member,
-        score: app_commands.Range[int, 1, 5],
-    ):
-        if user.id == interaction.user.id:
-            await interaction.response.send_message(
-                embed=info_embed(
-                    "🚫 Invalid target", "You cannot give rep to yourself."
-                ),
-                ephemeral=True,
-            )
-            return
-
-        recorded, retry_after = await self.db.record_quick_rating(
-            interaction.user.id,
-            user.id,
-            score,
-            QUICK_RATING_COOLDOWN_SECONDS,
-        )
-        if not recorded:
-            wait_label = _format_duration(int(retry_after or 0))
-            await interaction.response.send_message(
-                embed=info_embed(
-                    "⏳ On cooldown",
-                    f"You recently rated {user.mention}. You can send another rep in {wait_label}.",
-                ),
-                ephemeral=True,
-            )
-            return
-
-        (
-            _,
-            avg_score,
-            rating_count,
-            response_score,
-            response_count,
-            *_,
-            stored_premium,
-        ) = await self.db.profile(user.id)
-        premium_flag = bool(stored_premium)
-        await interaction.response.send_message(
-            embed=info_embed(
-                "⭐ Rep sent",
-                (
-                    f"You rated {user.mention} {score} star(s).\n"
-                    f"Their profile now shows: {rating_summary(avg_score, rating_count, premium_boost=premium_flag)}"
-                    f" • {response_summary(response_score, response_count, premium_boost=premium_flag)}"
-                ),
-            ),
-            ephemeral=True,
-        )
 
 
 class WishlistGroup(app_commands.Group):
