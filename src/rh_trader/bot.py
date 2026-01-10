@@ -704,8 +704,7 @@ class TraderBot(commands.Bot):
             if reviews:
                 review_lines = []
                 for reviewer_id, review_text, _ in reviews:
-                    reviewer_name = await _lookup_display_name(interaction.client, reviewer_id)
-                    review_lines.append(f"• {review_text}\n— {reviewer_name}")
+                    review_lines.append(f"• {review_text}\n— <@{reviewer_id}>")
                 reviews_value = "\n\n".join(review_lines)
             else:
                 reviews_value = "No reviews yet."
