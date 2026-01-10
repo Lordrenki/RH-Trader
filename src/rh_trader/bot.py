@@ -374,11 +374,11 @@ class TraderBot(commands.Bot):
 
     async def register_persistent_views(self) -> None:
         for _, user_id, _, _, listing_limit, tier_name, is_premium, image_url in await self.db.list_trade_posts():
-            try:
-                user = self.get_user(user_id) or await self.fetch_user(user_id)
+            user = self.get_user(user_id)
+            if user:
                 display_name = user.display_name
                 avatar_url = user.display_avatar.url
-            except discord.HTTPException:
+            else:
                 display_name = f"User {user_id}"
                 avatar_url = None
 
@@ -409,6 +409,7 @@ class TraderBot(commands.Bot):
             view = StorePostView(
                 self.db,
                 user_id,
+                poster_name=display_name,
                 listing_limit=effective_listing_limit,
                 store_tier_name=tier_name or None,
                 is_premium=premium_flag,
