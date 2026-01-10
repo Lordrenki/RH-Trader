@@ -324,7 +324,7 @@ async def build_store_embeds(
         embed.add_field(name="🎯 Wishlist", value=wishlist_value, inline=False)
         if latest_review:
             reviewer_id, review_text, _ = latest_review
-            reviewer_name = await _lookup_display_name(client, reviewer_id)
+            reviewer_name = f"<@{reviewer_id}>"
             review_value = f"{review_text}\n— {reviewer_name}"
             embed.add_field(
                 name="📝 Latest review", value=review_value, inline=False
