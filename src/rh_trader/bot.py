@@ -7,7 +7,7 @@ import re
 import logging
 import time
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, List, Optional, Tuple
 
 import discord
@@ -223,14 +223,32 @@ async def _remove_participants_and_close_thread(
         pass
 
 
+DISPLAY_NAME_CACHE_TTL = timedelta(minutes=20)
+_DISPLAY_NAME_CACHE: dict[int, tuple[str, datetime]] = {}
+
+
 async def _lookup_display_name(client: discord.Client, user_id: int) -> str:
+    now = datetime.now(timezone.utc)
+    cached = _DISPLAY_NAME_CACHE.get(user_id)
+    if cached:
+        cached_name, expires_at = cached
+        if expires_at > now:
+            return cached_name
+
     user = client.get_user(user_id)
     if user is None:
         try:
             user = await client.fetch_user(user_id)
         except discord.HTTPException:
             return f"User {user_id}"
-    return user.display_name
+        _DISPLAY_NAME_CACHE[user_id] = (
+            user.display_name,
+            now + DISPLAY_NAME_CACHE_TTL,
+        )
+        return user.display_name
+    display_name = user.display_name
+    _DISPLAY_NAME_CACHE[user_id] = (display_name, now + DISPLAY_NAME_CACHE_TTL)
+    return display_name
 
 
 async def build_store_embeds(
