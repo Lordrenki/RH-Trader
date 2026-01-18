@@ -22,8 +22,7 @@ from .embeds import (
     format_stock,
     format_wishlist,
     info_embed,
-    rating_summary,
-    response_summary,
+    rep_level_summary,
 )
 
 _log = logging.getLogger(__name__)
@@ -85,45 +84,6 @@ def _format_duration(seconds: int) -> str:
     if minutes:
         return f"{minutes} minute(s)"
     return f"{secs} second(s)"
-
-
-def _summary_with_optional_boost_text(
-    summary_fn: Callable[..., str],
-    score: float,
-    count: int,
-    *,
-    premium_boost: bool,
-    show_premium_boost_text: bool,
-    boost_percent: float | None = None,
-) -> str:
-    """Call a summary function, gracefully handling legacy signatures.
-
-    Older deployments may use ``rating_summary``/``response_summary`` definitions
-    that do not accept the ``show_premium_boost_text`` keyword. This helper tries
-    the modern signature first and falls back to stripping the premium suffix
-    from legacy outputs when the keyword is unsupported.
-    """
-
-    kwargs: dict[str, float] = {}
-    if boost_percent is not None:
-        kwargs["boost_percent"] = boost_percent
-
-    try:
-        return summary_fn(
-            score,
-            count,
-            premium_boost=premium_boost,
-            show_premium_boost_text=show_premium_boost_text,
-            **kwargs,
-        )
-    except TypeError as exc:
-        if "show_premium_boost_text" not in str(exc):
-            raise
-
-    text = summary_fn(score, count, premium_boost=premium_boost, **kwargs)
-    if not show_premium_boost_text and text.endswith(" (Premium boost)"):
-        return text.removesuffix(" (Premium boost)")
-    return text
 
 
 def _can_view_other(interaction: discord.Interaction, target: discord.User | discord.Member) -> bool:
@@ -264,9 +224,7 @@ async def build_store_embeds(
     badge_url: str | None,
     image_url: str | None,
 ) -> list[discord.Embed]:
-    contact, score, count, response_score, response_count, _, _, stored_premium = await db.profile(
-        user_id
-    )
+    contact, rep_level, rep_positive, rep_negative, _, _, stored_premium = await db.profile(user_id)
     latest_review = await db.latest_review_for_user(user_id)
     stock = await db.get_stock(user_id)
     wishlist = await db.get_wishlist(user_id)
@@ -278,21 +236,14 @@ async def build_store_embeds(
 
     embeds: list[discord.Embed] = []
     premium_flag = is_premium or bool(stored_premium)
-    rating_line = _summary_with_optional_boost_text(
-        rating_summary,
-        score,
-        count,
+    rep_line = rep_level_summary(
+        rep_level,
+        rep_positive,
+        rep_negative,
         premium_boost=premium_flag,
         show_premium_boost_text=False,
     )
-    response_line = _summary_with_optional_boost_text(
-        response_summary,
-        response_score,
-        response_count,
-        premium_boost=premium_flag,
-        show_premium_boost_text=False,
-    )
-    descriptor_lines = [f"{rating_line} • {response_line}"]
+    descriptor_lines = [rep_line]
     if store_tier_name:
         descriptor_lines.append(f"🏅 {store_tier_name}")
     if contact:
@@ -452,7 +403,7 @@ class TraderBot(commands.Bot):
             )
             return
 
-        score = 5 if sign == "+" else 1
+        score = 1 if sign == "+" else -1
         recorded, retry_after = await self.db.record_quick_rating(
             message.author.id,
             target_id,
@@ -471,22 +422,23 @@ class TraderBot(commands.Bot):
 
         (
             _,
-            avg_score,
-            rating_count,
-            response_score,
-            response_count,
+            rep_level,
+            rep_positive,
+            rep_negative,
             *_,
             stored_premium,
         ) = await self.db.profile(target_id)
         premium_flag = bool(stored_premium)
         action_label = "+rep" if sign == "+" else "-rep"
+        target_member = message.guild.get_member(target_id)
+        target_label = target_member.display_name if target_member else f"<@{target_id}>"
         await message.channel.send(
             embed=info_embed(
-                "⭐ Rep updated",
+                "🏅 Rep updated",
                 (
                     f"You sent {action_label} to <@{target_id}>.\n"
-                    f"Their profile now shows: {rating_summary(avg_score, rating_count, premium_boost=premium_flag)}"
-                    f" • {response_summary(response_score, response_count, premium_boost=premium_flag)}"
+                    f"{target_label} is Rep Level {rep_level}.\n"
+                    f"{rep_level_summary(rep_level, rep_positive, rep_negative, premium_boost=premium_flag)}"
                 ),
             )
         )
@@ -509,20 +461,21 @@ class TraderBot(commands.Bot):
 
             (
                 _,
-                avg_score,
-                rating_count,
-                response_score,
-                response_count,
+                rep_level,
+                rep_positive,
+                rep_negative,
                 *_,
                 stored_premium,
             ) = await db.profile(target.id)
             premium_flag = bool(stored_premium)
             await interaction.response.send_message(
                 embed=info_embed(
-                    f"⭐ Rep for {target.display_name}",
-                    (
-                        f"{rating_summary(avg_score, rating_count, premium_boost=premium_flag)}"
-                        f" • {response_summary(response_score, response_count, premium_boost=premium_flag)}"
+                    f"🏅 Rep for {target.display_name}",
+                    rep_level_summary(
+                        rep_level,
+                        rep_positive,
+                        rep_negative,
+                        premium_boost=premium_flag,
                     ),
                 )
             )
@@ -648,10 +601,9 @@ class TraderBot(commands.Bot):
 
             (
                 _,
-                score,
-                count,
-                response_score,
-                response_count,
+                rep_level,
+                rep_positive,
+                rep_negative,
                 timezone,
                 bio,
                 stored_premium,
@@ -667,21 +619,14 @@ class TraderBot(commands.Bot):
 
             trade_label = "trade" if trades == 1 else "trades"
             description_lines = [
-                _summary_with_optional_boost_text(
-                    rating_summary,
-                    score,
-                    count,
+                rep_level_summary(
+                    rep_level,
+                    rep_positive,
+                    rep_negative,
                     premium_boost=premium_flag,
                     show_premium_boost_text=False,
                 ),
                 f"🤝 {trades} {trade_label} completed",
-                _summary_with_optional_boost_text(
-                    response_summary,
-                    response_score,
-                    response_count,
-                    premium_boost=premium_flag,
-                    show_premium_boost_text=False,
-                ),
                 f"💎 Status: {'Premium trader' if premium_flag else 'Standard trader'}",
             ]
 
@@ -713,17 +658,17 @@ class TraderBot(commands.Bot):
             embed.add_field(name="📝 Recent reviews", value=reviews_value, inline=False)
             await interaction.response.send_message(embed=embed)
 
-        @self.tree.command(description="View top rated traders")
+        @self.tree.command(description="View top rep levels")
         async def leaderboard(interaction: discord.Interaction):
             rows = await db.leaderboard()
             if not rows:
                 await interaction.response.send_message(
-                    embed=info_embed("🏆 Leaderboard", "No ratings yet."),
+                    embed=info_embed("🏆 Leaderboard", "No rep yet."),
                 )
                 return
             description = "\n".join(
-                f"{idx+1}. <@{user_id}> — {_summary_with_optional_boost_text(rating_summary, score, count, premium_boost=is_premium, show_premium_boost_text=False)}"
-                for idx, (user_id, score, count, is_premium) in enumerate(rows)
+                f"{idx+1}. <@{user_id}> — {rep_level_summary(level, rep_positive, rep_negative, premium_boost=is_premium, show_premium_boost_text=False)}"
+                for idx, (user_id, level, rep_positive, rep_negative, is_premium) in enumerate(rows)
             )
             await interaction.response.send_message(embed=info_embed("🏆 Leaderboard", description))
 
@@ -1385,14 +1330,13 @@ class TraderBot(commands.Bot):
         if not aggregated:
             return
 
-        contact, score, count, response_score, response_count, _, _, stored_premium = (
-            await self.db.profile(poster.id)
+        contact, rep_level, rep_positive, rep_negative, _, _, stored_premium = await self.db.profile(
+            poster.id
         )
         trades = await self.db.trade_count(poster.id)
         premium_flag = bool(stored_premium)
         profile_lines = [
-            rating_summary(score, count, premium_boost=premium_flag),
-            response_summary(response_score, response_count, premium_boost=premium_flag),
+            rep_level_summary(rep_level, rep_positive, rep_negative, premium_boost=premium_flag),
             f"🤝 {trades} trade{'s' if trades != 1 else ''} completed",
         ]
         if contact:
@@ -2056,7 +2000,7 @@ class TradeMenuView(discord.ui.View):
         )
 
 
-async def send_rating_prompts(
+async def send_rep_prompts(
     bot: commands.Bot,
     db: Database,
     trade_id: int,
@@ -2068,25 +2012,25 @@ async def send_rating_prompts(
     thread: discord.Thread | None,
 ) -> None:
     if thread is None:
-        _log.warning("Skipping rating prompts for trade %s because no thread was provided", trade_id)
+        _log.warning("Skipping rep prompts for trade %s because no thread was provided", trade_id)
         return
 
-    rating_view = RatingView(db, trade_id, rater_id, partner_id, role_value, item)
-    bot.add_view(rating_view)
+    rep_view = RepFeedbackView(db, trade_id, rater_id, partner_id, role_value, item)
+    bot.add_view(rep_view)
     try:
         await thread.send(
             content=f"<@{rater_id}>",
             embed=info_embed(
-                "⭐ Rate your partner",
+                "🏅 Rep your partner",
                 (
                     f"Trade #{trade_id} for **{item}** is complete.\n"
-                    "Share a star rating and optional review before this thread closes."
+                    "Send +rep or -rep and optionally leave a review before this thread closes."
                 ),
             ),
-            view=rating_view,
+            view=rep_view,
         )
     except discord.HTTPException:
-        _log.warning("Failed to send in-thread rating prompt to %s for trade %s", rater_id, trade_id)
+        _log.warning("Failed to send in-thread rep prompt to %s for trade %s", rater_id, trade_id)
 
 
 class BasePersistentView(discord.ui.View):
@@ -2202,14 +2146,14 @@ class TradeThreadView(BasePersistentView):
                     )
 
                 prompt = info_embed(
-                    "⭐ Rate your partner",
+                    "🏅 Rep your partner",
                     (
                         f"Trade #{self.trade_id} for **{self.item}** is complete.\n"
-                        "Share a star rating and optional review before this thread closes."
+                        "Send +rep or -rep and optionally leave a review before this thread closes."
                     ),
                 )
                 prompt.set_footer(text="You'll be removed automatically after submitting feedback.")
-                rating_view = RatingView(
+                rep_view = RepFeedbackView(
                     self.db,
                     self.trade_id,
                     reviewer_id,
@@ -2218,14 +2162,14 @@ class TradeThreadView(BasePersistentView):
                     self.item,
                     on_finish=finish_feedback,
                 )
-                interaction.client.add_view(rating_view)
+                interaction.client.add_view(rep_view)
                 try:
                     await interaction.channel.send(
-                        content=f"<@{reviewer_id}>", embed=prompt, view=rating_view
+                        content=f"<@{reviewer_id}>", embed=prompt, view=rep_view
                     )
                 except discord.HTTPException:
                     _log.warning(
-                        "Failed to send in-thread rating prompt for trade %s", self.trade_id
+                        "Failed to send in-thread rep prompt for trade %s", self.trade_id
                     )
         finally:
             self.disable_all_items()
@@ -2239,7 +2183,7 @@ class TradeThreadView(BasePersistentView):
             embed=info_embed(
                 "✅ Trade closed",
                 (
-                    "Please leave your rating in this thread to finish closing it. I'll "
+                    "Please leave +rep or -rep in this thread to finish closing it. I'll "
                     "remove everyone once feedback is submitted."
                 ),
             ),
@@ -2284,7 +2228,7 @@ class ReviewModal(discord.ui.Modal):
         else:
             embed = info_embed(
                 "⚠️ Review not saved",
-                "Make sure you've rated your partner before submitting a review.",
+                "Make sure you've sent +rep or -rep before submitting a review.",
             )
         await interaction.response.send_message(embed=embed, ephemeral=True)
         if saved and self._on_complete is not None:
@@ -2532,7 +2476,7 @@ class TradeView(BasePersistentView):
         rater_id = self.initiator_id
         partner_id = self.buyer_id if rater_id == self.seller_id else self.seller_id
         role_value = "seller" if rater_id == self.seller_id else "buyer"
-        await send_rating_prompts(
+        await send_rep_prompts(
             interaction.client,
             self.db,
             self.trade_id,
@@ -2697,7 +2641,7 @@ class TradeView(BasePersistentView):
             _log.warning("Failed to notify buyer %s about rejected trade %s", self.buyer_id, self.trade_id)
 
 
-class RatingView(BasePersistentView):
+class RepFeedbackView(BasePersistentView):
     def __init__(
         self,
         db: Database,
@@ -2717,15 +2661,12 @@ class RatingView(BasePersistentView):
         self.role = role
         self.item = item
         self.on_finish = on_finish
-        self.rating_submitted = False
+        self.rep_submitted = False
         self.review_submitted = False
         self.feedback_finished = False
-        prefix = f"rating:{trade_id}:{rater_id}:{partner_id}:{role}"
-        self.rate_one.custom_id = f"{prefix}:1"
-        self.rate_two.custom_id = f"{prefix}:2"
-        self.rate_three.custom_id = f"{prefix}:3"
-        self.rate_four.custom_id = f"{prefix}:4"
-        self.rate_five.custom_id = f"{prefix}:5"
+        prefix = f"rep:{trade_id}:{rater_id}:{partner_id}:{role}"
+        self.rep_positive_button.custom_id = f"{prefix}:plus"
+        self.rep_negative_button.custom_id = f"{prefix}:minus"
         self.leave_review_button.custom_id = f"{prefix}:review"
         self.finish_button.custom_id = f"{prefix}:finish"
         self.finish_button.disabled = on_finish is None
@@ -2733,62 +2674,63 @@ class RatingView(BasePersistentView):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.rater_id:
             await interaction.response.send_message(
-                embed=info_embed("🚫 Not your rating", "Only this trade participant can submit this rating."),
+                embed=info_embed("🚫 Not your feedback", "Only this trade participant can submit rep."),
                 ephemeral=True,
             )
             return False
         return True
 
-    def _disable_rating_buttons(self) -> None:
-        for button in (
-            self.rate_one,
-            self.rate_two,
-            self.rate_three,
-            self.rate_four,
-            self.rate_five,
-        ):
+    def _disable_rep_buttons(self) -> None:
+        for button in (self.rep_positive_button, self.rep_negative_button):
             button.disabled = True
 
-    async def _handle_rating(self, interaction: discord.Interaction, score: int) -> None:
-        recorded = await self.db.record_trade_rating(
+    async def _handle_rep(self, interaction: discord.Interaction, score: int) -> None:
+        recorded = await self.db.record_trade_rep(
             self.trade_id, self.rater_id, self.partner_id, score, self.role
         )
         if recorded:
-            self.rating_submitted = True
+            self.rep_submitted = True
             if self.finish_button and self.finish_button.disabled:
                 self.finish_button.disabled = False
-        self._disable_rating_buttons()
+        else:
+            self.rep_submitted = await self.db.has_trade_rep(self.trade_id, self.rater_id)
+            if self.rep_submitted and self.finish_button and self.finish_button.disabled:
+                self.finish_button.disabled = False
+
+        self._disable_rep_buttons()
+        action_label = "+rep" if score > 0 else "-rep"
+        (
+            _,
+            rep_level,
+            rep_positive,
+            rep_negative,
+            *_,
+        ) = await self.db.profile(self.partner_id)
         embed = info_embed(
-            "⭐ Rating received" if recorded else "ℹ️ Rating already recorded",
-            f"You rated <@{self.partner_id}> {score} star(s) for **{self.item}**."
+            "🏅 Rep received" if recorded else "ℹ️ Rep already recorded",
+            (
+                f"You sent {action_label} to <@{self.partner_id}> for **{self.item}**.\n"
+                f"They are Rep Level {rep_level}."
+            )
             if recorded
             else "You have already submitted feedback for this trade.",
         )
         if recorded:
             embed.description += "\nTap **Leave Review** to share a short note about this trade (optional)."
+            embed.description += (
+                f"\n{rep_level_summary(rep_level, rep_positive, rep_negative)}"
+            )
         else:
             embed.description += "\nYou can still use **Leave Review** to update your written feedback."
         await interaction.response.edit_message(embed=embed, view=self)
 
-    @discord.ui.button(label="1", style=discord.ButtonStyle.gray)
-    async def rate_one(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self._handle_rating(interaction, 1)
+    @discord.ui.button(label="+rep", style=discord.ButtonStyle.success)
+    async def rep_positive_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._handle_rep(interaction, 1)
 
-    @discord.ui.button(label="2", style=discord.ButtonStyle.gray)
-    async def rate_two(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self._handle_rating(interaction, 2)
-
-    @discord.ui.button(label="3", style=discord.ButtonStyle.primary)
-    async def rate_three(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self._handle_rating(interaction, 3)
-
-    @discord.ui.button(label="4", style=discord.ButtonStyle.primary)
-    async def rate_four(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self._handle_rating(interaction, 4)
-
-    @discord.ui.button(label="5", style=discord.ButtonStyle.success)
-    async def rate_five(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self._handle_rating(interaction, 5)
+    @discord.ui.button(label="-rep", style=discord.ButtonStyle.danger)
+    async def rep_negative_button(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._handle_rep(interaction, -1)
 
     @discord.ui.button(
         label="Leave Review (optional)",
@@ -2799,12 +2741,12 @@ class RatingView(BasePersistentView):
     async def leave_review_button(
         self, interaction: discord.Interaction, _: discord.ui.Button
     ):
-        has_rating = await self.db.has_trade_rating(self.trade_id, self.rater_id)
-        if not has_rating:
+        has_rep = await self.db.has_trade_rep(self.trade_id, self.rater_id)
+        if not has_rep:
             await interaction.response.send_message(
                 embed=info_embed(
-                    "⭐ Rate first",
-                    "Please submit a star rating before leaving a review.",
+                    "🏅 Send rep first",
+                    "Please submit +rep or -rep before leaving a review.",
                 ),
                 ephemeral=True,
             )
@@ -2824,7 +2766,7 @@ class RatingView(BasePersistentView):
     async def _complete_feedback(self, interaction: discord.Interaction) -> None:
         if self.feedback_finished or self.on_finish is None:
             return
-        if not self.rating_submitted:
+        if not self.rep_submitted:
             return
 
         self.feedback_finished = True
@@ -2843,9 +2785,9 @@ class RatingView(BasePersistentView):
             await interaction.response.defer(ephemeral=True)
             return
 
-        if not self.rating_submitted:
+        if not self.rep_submitted:
             await interaction.response.send_message(
-                embed=info_embed("⭐ Rate first", "Submit a star rating before closing this trade."),
+                embed=info_embed("🏅 Send rep first", "Submit +rep or -rep before closing this trade."),
                 ephemeral=True,
             )
             return

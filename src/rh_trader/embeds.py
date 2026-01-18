@@ -40,40 +40,17 @@ def format_requests(entries: Iterable[Tuple[int, str, int, str]]) -> str:
     return "\n".join(lines) or "No requests posted yet."
 
 
-def rating_summary(
-    score: float,
-    count: int,
+def rep_level_summary(
+    level: int,
+    positive: int,
+    negative: int,
     *,
     premium_boost: bool = False,
     show_premium_boost_text: bool = True,
-    boost_percent: float = 0.05,
 ) -> str:
-    if count == 0:
-        return "No ratings yet"
+    total = positive + negative
+    if total == 0:
+        return "No rep yet"
 
-    adjusted_score = score
-    if premium_boost:
-        adjusted_score = min(5.0, score * (1 + boost_percent))
     suffix = " (Premium boost)" if premium_boost and show_premium_boost_text else ""
-
-    return f"⭐ {adjusted_score:.2f} average from {count} ratings{suffix}"
-
-
-def response_summary(
-    score: float,
-    count: int,
-    *,
-    premium_boost: bool = False,
-    show_premium_boost_text: bool = True,
-    boost_percent: float = 0.05,
-) -> str:
-    if count == 0:
-        return "⚡ No response data yet"
-
-    adjusted_score = score
-    if premium_boost:
-        adjusted_score = min(10.0, score * (1 + boost_percent))
-    suffix = " (Premium boost)" if premium_boost and show_premium_boost_text else ""
-
-    # Response output intentionally omits trade counts to keep the display concise.
-    return f"⚡ {adjusted_score:.1f}/10 response speed{suffix}"
+    return f"🏅 Rep Level {level} ({positive} 👍 / {negative} 👎){suffix}"
