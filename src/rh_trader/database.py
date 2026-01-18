@@ -17,6 +17,7 @@ class Database:
         self.path = path
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self._lock = asyncio.Lock()
+        self.max_rep_level = 200
 
     async def setup(self) -> None:
         async with self._connect() as db:
@@ -29,6 +30,8 @@ class Database:
                     rating_count INTEGER DEFAULT 0,
                     response_total INTEGER DEFAULT 0,
                     response_count INTEGER DEFAULT 0,
+                    rep_positive INTEGER DEFAULT 0,
+                    rep_negative INTEGER DEFAULT 0,
                     timezone TEXT DEFAULT '',
                     bio TEXT DEFAULT '',
                     is_premium INTEGER DEFAULT 0
@@ -207,6 +210,10 @@ class Database:
             await db.execute("ALTER TABLE users ADD COLUMN response_total INTEGER DEFAULT 0")
         if "response_count" not in columns:
             await db.execute("ALTER TABLE users ADD COLUMN response_count INTEGER DEFAULT 0")
+        if "rep_positive" not in columns:
+            await db.execute("ALTER TABLE users ADD COLUMN rep_positive INTEGER DEFAULT 0")
+        if "rep_negative" not in columns:
+            await db.execute("ALTER TABLE users ADD COLUMN rep_negative INTEGER DEFAULT 0")
         if "timezone" not in columns:
             await db.execute("ALTER TABLE users ADD COLUMN timezone TEXT DEFAULT ''")
         if "bio" not in columns:
@@ -532,15 +539,15 @@ class Database:
         *,
         now: int | None = None,
     ) -> tuple[bool, int | None]:
-        """Record a star rating outside of trades with per-user cooldowns.
+        """Record a +/- rep action outside of trades with per-user cooldowns.
 
         Returns a tuple of (recorded, retry_after_seconds). When the rating is rejected
         because of cooldown, ``recorded`` is False and ``retry_after_seconds`` contains
         the time remaining until another rating is allowed.
         """
 
-        if score < 1 or score > 5:
-            raise ValueError("Score must be between 1 and 5")
+        if score not in (-1, 1):
+            raise ValueError("Score must be either -1 or 1")
         await self.ensure_user(rater_id)
         await self.ensure_user(target_id)
 
@@ -562,11 +569,16 @@ class Database:
                     "INSERT INTO quick_ratings(rater_id, target_id, score, created_at) VALUES (?, ?, ?, ?)",
                     (rater_id, target_id, score, timestamp),
                 )
-                await db.execute(
-                    "UPDATE users SET rating_total = rating_total + ?, rating_count = rating_count + 1\n"
-                    "WHERE user_id = ?",
-                    (score, target_id),
-                )
+                if score > 0:
+                    await db.execute(
+                        "UPDATE users SET rep_positive = rep_positive + 1 WHERE user_id = ?",
+                        (target_id,),
+                    )
+                else:
+                    await db.execute(
+                        "UPDATE users SET rep_negative = rep_negative + 1 WHERE user_id = ?",
+                        (target_id,),
+                    )
                 await db.commit()
         return True, None
 
@@ -683,8 +695,6 @@ class Database:
                     "WHERE id = ? AND seller_id = ? AND status = 'pending'",
                     (int(time.time()), trade_id, seller_id),
                 )
-                if cursor.rowcount:
-                    await self._record_response_for_trade(db, trade_id)
                 await db.commit()
                 return cursor.rowcount > 0
 
@@ -736,8 +746,6 @@ class Database:
                     "WHERE id = ? AND status = 'open'",
                     (int(time.time()), trade_id),
                 )
-                if cursor.rowcount:
-                    await self._record_response_for_trade(db, trade_id)
                 await db.commit()
                 return cursor.rowcount > 0
 
@@ -749,8 +757,6 @@ class Database:
                     "WHERE id = ? AND status IN ('open', 'pending')",
                     (int(time.time()), trade_id),
                 )
-                if cursor.rowcount:
-                    await self._record_response_for_trade(db, trade_id)
                 await db.commit()
                 return cursor.rowcount > 0
 
@@ -864,11 +870,11 @@ class Database:
             )
             return await cursor.fetchall()
 
-    async def record_trade_rating(
+    async def record_trade_rep(
         self, trade_id: int, rater_id: int, partner_id: int, score: int, role: str
     ) -> bool:
-        if score < 1 or score > 5:
-            raise ValueError("Score must be between 1 and 5")
+        if score not in (-1, 1):
+            raise ValueError("Score must be either -1 or 1")
         await self.ensure_user(rater_id)
         await self.ensure_user(partner_id)
         async with self._lock:
@@ -881,15 +887,20 @@ class Database:
                 if cursor.rowcount == 0:
                     await db.commit()
                     return False
-                await db.execute(
-                    "UPDATE users SET rating_total = rating_total + ?, rating_count = rating_count + 1\n"
-                    "WHERE user_id = ?",
-                    (score, partner_id),
-                )
+                if score > 0:
+                    await db.execute(
+                        "UPDATE users SET rep_positive = rep_positive + 1 WHERE user_id = ?",
+                        (partner_id,),
+                    )
+                else:
+                    await db.execute(
+                        "UPDATE users SET rep_negative = rep_negative + 1 WHERE user_id = ?",
+                        (partner_id,),
+                    )
                 await db.commit()
                 return True
 
-    async def has_trade_rating(self, trade_id: int, rater_id: int) -> bool:
+    async def has_trade_rep(self, trade_id: int, rater_id: int) -> bool:
         async with self._connect() as db:
             cursor = await db.execute(
                 "SELECT 1 FROM trade_feedback WHERE trade_id = ? AND rater_id = ?",
@@ -968,7 +979,6 @@ class Database:
                             "UPDATE trades SET status = ?, closed_at = COALESCE(closed_at, ?) WHERE id = ?",
                             (status, now_ts, trade_id),
                         )
-                        await self._record_response_for_trade(db, trade_id)
                     else:
                         await db.execute(
                             "UPDATE trades SET status = ? WHERE id = ?",
@@ -976,44 +986,49 @@ class Database:
                         )
                 await db.commit()
 
-    async def leaderboard(self, limit: int = 10) -> List[Tuple[int, float, int, bool]]:
+    def _rep_level(self, positive: int, negative: int) -> int:
+        total = positive + negative
+        if total <= 0:
+            return 0
+        level = round((positive / total) * self.max_rep_level)
+        return max(0, min(self.max_rep_level, level))
+
+    async def leaderboard(self, limit: int = 10) -> List[Tuple[int, int, int, int, bool]]:
         async with self._connect() as db:
             cursor = await db.execute(
-                "SELECT user_id,\n"
-                "CASE WHEN rating_count = 0 THEN 0 ELSE CAST(rating_total AS FLOAT) / rating_count END AS score,\n"
-                "rating_count,\n"
-                "is_premium\n"
-                "FROM users ORDER BY score DESC, rating_count DESC LIMIT ?",
+                "SELECT user_id, rep_positive, rep_negative, is_premium\n"
+                "FROM users\n"
+                "ORDER BY CASE WHEN rep_positive + rep_negative = 0 THEN 0\n"
+                "     ELSE CAST(rep_positive AS FLOAT) / (rep_positive + rep_negative) END DESC,\n"
+                "     rep_positive DESC, rep_negative ASC\n"
+                "LIMIT ?",
                 (limit,),
             )
             rows = await cursor.fetchall()
-            return [(user_id, score, count, bool(is_premium)) for user_id, score, count, is_premium in rows]
+            results: list[tuple[int, int, int, int, bool]] = []
+            for user_id, rep_positive, rep_negative, is_premium in rows:
+                level = self._rep_level(rep_positive, rep_negative)
+                results.append((user_id, level, rep_positive, rep_negative, bool(is_premium)))
+            return results
 
-    async def profile(self, user_id: int) -> Tuple[str, float, int, float, int, str, str, bool]:
+    async def profile(self, user_id: int) -> Tuple[str, int, int, int, str, str, bool]:
         async with self._connect() as db:
             cursor = await db.execute(
-                "SELECT contact,\n"
-                "CASE WHEN rating_count = 0 THEN 0 ELSE CAST(rating_total AS FLOAT) / rating_count END AS score,\n"
-                "rating_count,\n"
-                "CASE WHEN response_count = 0 THEN 0 ELSE CAST(response_total AS FLOAT) / response_count END AS response_score,\n"
-                "response_count,\n"
-                "timezone,\n"
-                "bio,\n"
-                "is_premium\n"
+                "SELECT contact, rep_positive, rep_negative, timezone, bio, is_premium\n"
                 "FROM users WHERE user_id = ?",
                 (user_id,),
             )
             row = await cursor.fetchone()
             if row is None:
-                return "", 0.0, 0, 0.0, 0, "", "", False
+                return "", 0, 0, 0, "", "", False
 
-            contact, score, rating_count, response_score, response_count, timezone, bio, is_premium = row
+            contact, rep_positive, rep_negative, timezone, bio, is_premium = row
+            level = self._rep_level(rep_positive, rep_negative)
             return (
                 contact,
-                score,
-                rating_count,
-                response_score,
-                response_count,
+                level,
+                rep_positive,
+                rep_negative,
                 timezone,
                 bio,
                 bool(is_premium),
