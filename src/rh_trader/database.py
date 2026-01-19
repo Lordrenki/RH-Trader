@@ -993,6 +993,19 @@ class Database:
         level = round((positive / total) * self.max_rep_level)
         return max(0, min(self.max_rep_level, level))
 
+    async def set_rep_level(self, user_id: int, level: int) -> None:
+        await self.ensure_user(user_id)
+        clamped = max(0, min(self.max_rep_level, level))
+        positive = clamped
+        negative = self.max_rep_level - clamped
+        async with self._lock:
+            async with self._connect() as db:
+                await db.execute(
+                    "UPDATE users SET rep_positive = ?, rep_negative = ? WHERE user_id = ?",
+                    (positive, negative, user_id),
+                )
+                await db.commit()
+
     async def leaderboard(self, limit: int = 10) -> List[Tuple[int, int, int, int, bool]]:
         async with self._connect() as db:
             cursor = await db.execute(
