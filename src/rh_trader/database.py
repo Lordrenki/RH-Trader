@@ -987,17 +987,14 @@ class Database:
                 await db.commit()
 
     def _rep_level(self, positive: int, negative: int) -> int:
-        total = positive + negative
-        if total <= 0:
-            return 0
-        level = round((positive / total) * self.max_rep_level)
+        level = positive - negative
         return max(0, min(self.max_rep_level, level))
 
     async def set_rep_level(self, user_id: int, level: int) -> None:
         await self.ensure_user(user_id)
         clamped = max(0, min(self.max_rep_level, level))
         positive = clamped
-        negative = self.max_rep_level - clamped
+        negative = 0
         async with self._lock:
             async with self._connect() as db:
                 await db.execute(
@@ -1011,8 +1008,7 @@ class Database:
             cursor = await db.execute(
                 "SELECT user_id, rep_positive, rep_negative, is_premium\n"
                 "FROM users\n"
-                "ORDER BY CASE WHEN rep_positive + rep_negative = 0 THEN 0\n"
-                "     ELSE CAST(rep_positive AS FLOAT) / (rep_positive + rep_negative) END DESC,\n"
+                "ORDER BY (rep_positive - rep_negative) DESC,\n"
                 "     rep_positive DESC, rep_negative ASC\n"
                 "LIMIT ?",
                 (limit,),
