@@ -37,6 +37,8 @@ EMBED_FIELD_CHAR_LIMIT = 1000
 REVIEW_CHAR_LIMIT = 300
 TRADE_INACTIVITY_WARNING_SECONDS = 12 * 60 * 60
 TRADE_INACTIVITY_CLOSE_SECONDS = 24 * 60 * 60
+REP_LEVEL_ROLE_ID = 1_433_701_792_721_666_128
+REP_LEVEL_ROLE_THRESHOLD = 5
 PREMIUM_BADGE_URL = (
     "https://cdn.discordapp.com/attachments/1431560702518104175/1447739322022498364/"
     "discotools-xyz-icon.png?ex=6938b7d0&is=69376650&hm=bd0daea439bc5d7622d4b7008ba08ba8f5e44f30a79394a23dd58f5f5a07a3e6"
@@ -116,6 +118,30 @@ def _store_listing_limit_for_tier(tier: StoreTierBenefits | None) -> int:
     """Return the applicable listing limit for store and inventory entries."""
 
     return PREMIUM_STORE_LISTING_LIMIT if tier else DEFAULT_STORE_LISTING_LIMIT
+
+
+async def _maybe_assign_rep_role(
+    guild: discord.Guild, member: discord.Member | None, rep_level: int
+) -> None:
+    if rep_level < REP_LEVEL_ROLE_THRESHOLD:
+        return
+
+    role = guild.get_role(REP_LEVEL_ROLE_ID)
+    if role is None:
+        _log.warning("Rep role %s not found in guild %s", REP_LEVEL_ROLE_ID, guild.id)
+        return
+
+    if member is None:
+        _log.warning("Unable to resolve member for rep role assignment in guild %s", guild.id)
+        return
+
+    if role in member.roles:
+        return
+
+    try:
+        await member.add_roles(role, reason="Reached rep level 5")
+    except discord.HTTPException:
+        _log.warning("Failed to assign rep role %s to member %s", role.id, member.id)
 
 
 def _listing_limit_for_interaction(interaction: discord.Interaction) -> int:
@@ -431,7 +457,13 @@ class TraderBot(commands.Bot):
         premium_flag = bool(stored_premium)
         action_label = "+rep" if sign == "+" else "-rep"
         target_member = message.guild.get_member(target_id)
+        if target_member is None:
+            try:
+                target_member = await message.guild.fetch_member(target_id)
+            except discord.HTTPException:
+                target_member = None
         target_label = target_member.display_name if target_member else f"<@{target_id}>"
+        await _maybe_assign_rep_role(message.guild, target_member, rep_level)
         await message.channel.send(
             embed=info_embed(
                 "🏅 Rep updated",
@@ -2706,6 +2738,15 @@ class RepFeedbackView(BasePersistentView):
             rep_negative,
             *_,
         ) = await self.db.profile(self.partner_id)
+        guild = interaction.guild
+        if guild is not None:
+            partner_member = guild.get_member(self.partner_id)
+            if partner_member is None:
+                try:
+                    partner_member = await guild.fetch_member(self.partner_id)
+                except discord.HTTPException:
+                    partner_member = None
+            await _maybe_assign_rep_role(guild, partner_member, rep_level)
         embed = info_embed(
             "🏅 Rep received" if recorded else "ℹ️ Rep already recorded",
             (
