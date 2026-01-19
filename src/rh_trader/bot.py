@@ -38,6 +38,7 @@ REVIEW_CHAR_LIMIT = 300
 TRADE_INACTIVITY_WARNING_SECONDS = 12 * 60 * 60
 TRADE_INACTIVITY_CLOSE_SECONDS = 24 * 60 * 60
 REP_LEVEL_ROLE_ID = 1_433_701_792_721_666_128
+ADMIN_ROLE_ID = 927_355_923_364_720_651
 REP_LEVEL_ROLE_THRESHOLD = 5
 PREMIUM_BADGE_URL = (
     "https://cdn.discordapp.com/attachments/1431560702518104175/1447739322022498364/"
@@ -510,6 +511,58 @@ class TraderBot(commands.Bot):
                         premium_boost=premium_flag,
                     ),
                 )
+            )
+
+        @self.tree.command(name="editrep", description="Manually adjust a user's rep level")
+        @app_commands.describe(user="Member whose rep level you want to change")
+        @app_commands.describe(level="New rep level (0-200)")
+        async def editrep(
+            interaction: discord.Interaction,
+            user: discord.Member,
+            level: app_commands.Range[int, 0, 200],
+        ):
+            if interaction.guild is None:
+                await interaction.response.send_message(
+                    embed=info_embed("🌐 Guild only", "This command can only be used inside a server."),
+                    ephemeral=True,
+                )
+                return
+
+            member = interaction.user
+            if not isinstance(member, discord.Member) or not any(
+                role.id == ADMIN_ROLE_ID for role in member.roles
+            ):
+                await interaction.response.send_message(
+                    embed=info_embed(
+                        "🚫 Missing permissions",
+                        "You need the admin role to edit rep levels.",
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            await db.set_rep_level(user.id, int(level))
+            (
+                _,
+                rep_level,
+                rep_positive,
+                rep_negative,
+                *_,
+                stored_premium,
+            ) = await db.profile(user.id)
+            premium_flag = bool(stored_premium)
+            await _maybe_assign_rep_role(interaction.guild, user, rep_level)
+            await interaction.response.send_message(
+                embed=info_embed(
+                    f"✅ Rep updated for {user.display_name}",
+                    rep_level_summary(
+                        rep_level,
+                        rep_positive,
+                        rep_negative,
+                        premium_boost=premium_flag,
+                    ),
+                ),
+                ephemeral=True,
             )
 
         @self.tree.command(description="Search community inventories or wishlists for an item")
