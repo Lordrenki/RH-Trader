@@ -551,7 +551,7 @@ class Database:
         await self.ensure_user(rater_id)
         await self.ensure_user(target_id)
 
-        timestamp = int(now or asyncio.get_event_loop().time())
+        timestamp = int(now or time.time())
         async with self._lock:
             async with self._connect() as db:
                 cursor = await db.execute(

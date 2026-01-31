@@ -420,12 +420,21 @@ class TraderBot(commands.Bot):
             return
 
         normalized_content = unicodedata.normalize("NFKC", message.content.strip())
-        match = re.search(r"(?:^|\s)([+-])rep\s+<@!?(\d+)>", normalized_content, re.IGNORECASE)
+        match = re.search(r"(?:^|\s)([+-])\s*rep\b", normalized_content, re.IGNORECASE)
         if not match:
             return
+        if not message.mentions:
+            await message.channel.send(
+                embed=info_embed(
+                    "🚫 Missing mention",
+                    "Please mention a user, e.g. `+rep @user` or `-rep @user`.",
+                )
+            )
+            return
 
-        sign, target_id_label = match.groups()
-        target_id = int(target_id_label)
+        sign = match.group(1)
+        target_user = message.mentions[0]
+        target_id = target_user.id
         if target_id == message.author.id:
             await message.channel.send(
                 embed=info_embed("🚫 Invalid target", "You cannot give rep to yourself.")
