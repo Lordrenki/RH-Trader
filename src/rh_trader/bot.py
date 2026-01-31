@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
+import unicodedata
 import logging
 import time
 from dataclasses import dataclass
@@ -418,7 +419,8 @@ class TraderBot(commands.Bot):
         if message.guild is None:
             return
 
-        match = re.match(r"^([+-])rep\s+<@!?(\d+)>", message.content.strip(), re.IGNORECASE)
+        normalized_content = unicodedata.normalize("NFKC", message.content.strip())
+        match = re.search(r"(?:^|\s)([+-])rep\s+<@!?(\d+)>", normalized_content, re.IGNORECASE)
         if not match:
             return
 
