@@ -13,7 +13,10 @@ def info_embed(title: str, description: str | None = None, *, color: int = 0x2b2
 
 
 def format_stock(fields: Iterable[Tuple[str, int]]) -> str:
-    return "\n".join(f"**{item}** — {qty} in stock" for item, qty in fields) or "No items listed yet."
+    return (
+        "\n".join(f"**{item}** — {qty} in inventory" for item, qty in fields)
+        or "No items listed yet."
+    )
 
 
 def format_wishlist(entries: Iterable[Tuple[str, str]]) -> str:

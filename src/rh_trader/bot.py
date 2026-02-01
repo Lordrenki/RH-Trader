@@ -7,9 +7,8 @@ import re
 import unicodedata
 import logging
 import time
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Optional, Tuple
 
 import discord
 from discord import app_commands
@@ -28,10 +27,7 @@ from .embeds import (
 
 _log = logging.getLogger(__name__)
 QUICK_RATING_COOLDOWN_SECONDS = 24 * 60 * 60
-STORE_POST_WINDOW_SECONDS = 60 * 60
-DEFAULT_STORE_POST_LIMIT = 1
-DEFAULT_STORE_LISTING_LIMIT = 20
-PREMIUM_STORE_LISTING_LIMIT = 50
+DEFAULT_LISTING_LIMIT = 50
 DEFAULT_EMBED_COLOR = 0x2B2D31
 PREMIUM_EMBED_COLOR = 0xFFD700
 EMBED_FIELD_CHAR_LIMIT = 1000
@@ -46,33 +42,6 @@ PREMIUM_BADGE_URL = (
     "discotools-xyz-icon.png?ex=6938b7d0&is=69376650&hm=bd0daea439bc5d7622d4b7008ba08ba8f5e44f30a79394a23dd58f5f5a07a3e6"
 )
 
-
-@dataclass(frozen=True)
-class StoreTierBenefits:
-    """Benefit limits for a specific premium tier."""
-
-    name: str
-    rank: int
-    post_limit: int
-    listing_limit: int
-
-
-#: Mapping of premium SKU IDs to tier benefits. Tiers scale from Premium
-#: Trader (Tier 1) through Elite Trader (Tier 2) and Expert Trader (Tier 3).
-STORE_TIER_BY_SKU: dict[int, StoreTierBenefits] = {
-    1_447_683_957_981_319_169: StoreTierBenefits(
-        "Premium Trader", rank=1, post_limit=3, listing_limit=25
-    ),
-    1_447_725_003_956_293_724: StoreTierBenefits(
-        "Elite Trader", rank=2, post_limit=4, listing_limit=35
-    ),
-    1_447_725_110_529_102_005: StoreTierBenefits(
-        "Expert Trader", rank=3, post_limit=5, listing_limit=50
-    ),
-}
-
-#: Consumable SKU that enables a single global store post across all servers.
-GLOBAL_STORE_POST_SKU = 1_447_725_322_802_823_299
 
 
 def _format_duration(seconds: int) -> str:
@@ -116,12 +85,6 @@ def _paginate_field_entries(entries: list, formatter, per_page: int) -> list[str
     return pages
 
 
-def _store_listing_limit_for_tier(tier: StoreTierBenefits | None) -> int:
-    """Return the applicable listing limit for store and inventory entries."""
-
-    return PREMIUM_STORE_LISTING_LIMIT if tier else DEFAULT_STORE_LISTING_LIMIT
-
-
 async def _maybe_assign_rep_role(
     guild: discord.Guild, member: discord.Member | None, rep_level: int
 ) -> None:
@@ -148,12 +111,7 @@ async def _maybe_assign_rep_role(
 
 def _listing_limit_for_interaction(interaction: discord.Interaction) -> int:
     """Return how many stock/wishlist entries a user may store."""
-
-    client = getattr(interaction, "client", None)
-    has_premium = getattr(client, "_has_store_premium", None)
-    tier = has_premium(interaction) if callable(has_premium) else None
-
-    return _store_listing_limit_for_tier(tier)
+    return DEFAULT_LISTING_LIMIT
 
 
 async def _enforce_listing_limit(
@@ -170,8 +128,7 @@ async def _enforce_listing_limit(
         embed=info_embed(
             "🚫 Limit reached",
             (
-                f"You can only save up to {limit} {list_name} items unless you have "
-                "a premium store tier."
+                f"You can only save up to {limit} {list_name} items right now."
             ),
         ),
         ephemeral=True,
@@ -239,83 +196,6 @@ async def _lookup_display_name(client: discord.Client, user_id: int) -> str:
     return display_name
 
 
-async def build_store_embeds(
-    client: discord.Client,
-    db: Database,
-    user_id: int,
-    display_name: str,
-    *,
-    avatar_url: str | None,
-    listing_limit: int,
-    store_tier_name: str | None,
-    is_premium: bool,
-    badge_url: str | None,
-    image_url: str | None,
-) -> list[discord.Embed]:
-    contact, rep_level, rep_positive, rep_negative, _, _, stored_premium = await db.profile(user_id)
-    latest_review = await db.latest_review_for_user(user_id)
-    stock = await db.get_stock(user_id)
-    wishlist = await db.get_wishlist(user_id)
-
-    listing_limit = max(1, listing_limit)
-    stock_pages = _paginate_field_entries(stock, format_stock, listing_limit)
-    wishlist_pages = _paginate_field_entries(wishlist, format_wishlist, listing_limit)
-    total_pages = max(len(stock_pages), len(wishlist_pages), 1)
-
-    embeds: list[discord.Embed] = []
-    premium_flag = is_premium or bool(stored_premium)
-    rep_line = rep_level_summary(
-        rep_level,
-        rep_positive,
-        rep_negative,
-        premium_boost=premium_flag,
-        show_premium_boost_text=False,
-    )
-    descriptor_lines = [rep_line]
-    if store_tier_name:
-        descriptor_lines.append(f"🏅 {store_tier_name}")
-    if contact:
-        descriptor_lines.append(f"📞 Contact: {contact}")
-
-    color = PREMIUM_EMBED_COLOR if premium_flag else DEFAULT_EMBED_COLOR
-    author_label = (
-        f"{display_name} • {store_tier_name}" if store_tier_name else display_name
-    )
-
-    for idx in range(total_pages):
-        stock_value = stock_pages[idx] if idx < len(stock_pages) else format_stock([])
-        wishlist_value = (
-            wishlist_pages[idx] if idx < len(wishlist_pages) else format_wishlist([])
-        )
-        embed = discord.Embed(
-            title=f"🛒 {display_name}'s Store",
-            description="\n".join(descriptor_lines),
-            color=color,
-        )
-        if avatar_url:
-            embed.set_author(name=author_label, icon_url=avatar_url)
-        else:
-            embed.set_author(name=author_label)
-        thumbnail_url = badge_url or (PREMIUM_BADGE_URL if premium_flag else None)
-        if thumbnail_url:
-            embed.set_thumbnail(url=thumbnail_url)
-        embed.add_field(name="📦 Inventory", value=stock_value, inline=False)
-        embed.add_field(name="🎯 Wishlist", value=wishlist_value, inline=False)
-        if latest_review:
-            reviewer_id, review_text, _ = latest_review
-            reviewer_name = f"<@{reviewer_id}>"
-            review_value = f"{review_text}\n— {reviewer_name}"
-            embed.add_field(
-                name="📝 Latest review", value=review_value, inline=False
-            )
-        if image_url:
-            embed.set_image(url=image_url)
-        embed.set_footer(text="Scrap Market • Made with ♡ by Kuro")
-        embeds.append(embed)
-
-    return embeds
-
-
 class TraderBot(commands.Bot):
     """Discord bot that exposes trading slash commands."""
 
@@ -335,7 +215,7 @@ class TraderBot(commands.Bot):
         self.settings = settings
         self.db = db
         self.catalog = catalog or CatalogClient(settings.catalog_base_url)
-        self.stock_actions = StockGroup(self.db)
+        self.stock_actions = StockGroup(self.db, self._send_alert_notifications)
         self.wishlist_actions = WishlistGroup(self.db)
         self.alert_actions = AlertGroup(self.db, self._alert_limit)
         self._inactivity_task: asyncio.Task | None = None
@@ -346,57 +226,9 @@ class TraderBot(commands.Bot):
         self.tree.add_command(self.wishlist_actions)
         self.tree.add_command(self.alert_actions)
         await self.add_misc_commands()
-        await self.register_persistent_views()
         await self.tree.sync()
         _log.info("Slash commands synced")
         self._inactivity_task = self.loop.create_task(self._inactivity_watcher())
-
-    async def register_persistent_views(self) -> None:
-        for _, user_id, _, _, listing_limit, tier_name, is_premium, image_url in await self.db.list_trade_posts():
-            user = self.get_user(user_id)
-            if user:
-                display_name = user.display_name
-                avatar_url = user.display_avatar.url
-            else:
-                display_name = f"User {user_id}"
-                avatar_url = None
-
-            premium_flag = bool(is_premium)
-            effective_listing_limit = max(
-                1,
-                listing_limit
-                or (
-                    PREMIUM_STORE_LISTING_LIMIT
-                    if premium_flag
-                    else DEFAULT_STORE_LISTING_LIMIT
-                ),
-            )
-
-            embeds = await build_store_embeds(
-                self,
-                self.db,
-                user_id,
-                display_name,
-                avatar_url=avatar_url,
-                listing_limit=effective_listing_limit,
-                store_tier_name=tier_name or None,
-                is_premium=premium_flag,
-                badge_url=PREMIUM_BADGE_URL if premium_flag else None,
-                image_url=image_url or None,
-            )
-
-            view = StorePostView(
-                self.db,
-                user_id,
-                poster_name=display_name,
-                listing_limit=effective_listing_limit,
-                store_tier_name=tier_name or None,
-                is_premium=premium_flag,
-                badge_url=PREMIUM_BADGE_URL if premium_flag else None,
-                image_url=image_url or None,
-            )
-            view.set_page_count(len(embeds))
-            self.add_view(view)
 
     async def close(self) -> None:
         await self.catalog.close()
@@ -583,7 +415,7 @@ class TraderBot(commands.Bot):
         )
         @app_commands.choices(
             location=[
-                app_commands.Choice(name="Stock", value="stock"),
+                app_commands.Choice(name="Inventory", value="stock"),
                 app_commands.Choice(name="Wishlist", value="wishlist"),
             ]
         )
@@ -610,18 +442,6 @@ class TraderBot(commands.Bot):
 
                 return resolved
 
-            async def _store_post_link(member: discord.Member) -> str:
-                if interaction.guild is None:
-                    return ""
-
-                trade_post = await db.get_trade_post(interaction.guild.id, member.id)
-                if trade_post is None:
-                    return ""
-
-                channel_id, message_id, *_ = trade_post
-                url = f"https://discord.com/channels/{interaction.guild.id}/{channel_id}/{message_id}"
-                return f" · [Store post]({url})"
-
             if location.value == "wishlist":
                 results = await db.search_wishlist(item)
                 results = await _resolve_guild_members(results)
@@ -629,7 +449,6 @@ class TraderBot(commands.Bot):
                     (
                         f"🔍 {member.display_name} wants **{item}**"
                         + (f" — {note}" if note else "")
-                        + (await _store_post_link(member))
                     )
                     for member, (_, item, note) in results
                 ]
@@ -644,14 +463,13 @@ class TraderBot(commands.Bot):
                 lines = [
                     (
                         f"🔍 {member.display_name} has **{item}** (x{qty})"
-                        + (await _store_post_link(member))
                     )
                     for member, (_, item, qty) in results
                 ]
                 description = (
                     "\n".join(lines)
                     if lines
-                    else "No matching stock items found from members of this server."
+                    else "No matching inventory items found from members of this server."
                 )
 
             embed = info_embed("🔎 Search results", description)
@@ -662,24 +480,20 @@ class TraderBot(commands.Bot):
                 ),
             )
 
-        @self.tree.command(name="store", description="Open a quick trading control panel")
-        async def store(interaction: discord.Interaction):
+        @self.tree.command(name="inventory", description="Open a quick inventory control panel")
+        async def inventory(interaction: discord.Interaction):
             embed = info_embed(
-                "🧰 Trade menu",
+                "🧰 Inventory menu",
                 (
-                    "Manage your shop from one place. Update stock, wishlist entries, alerts, profile"
-                    " details, and store posts without typing slash commands."
+                    "Manage your inventory from one place. Add items, adjust quantities, and"
+                    " clean up your list without typing slash commands."
                 ),
             )
             await interaction.response.send_message(
                 embed=embed,
-                view=TradeMenuView(
+                view=InventoryMenuView(
                     self.db,
                     self.stock_actions,
-                    self.wishlist_actions,
-                    self.alert_actions,
-                    self._handle_store_post,
-                    self._update_store_post,
                 ),
                 ephemeral=True,
             )
@@ -708,10 +522,7 @@ class TraderBot(commands.Bot):
             reviews = await db.recent_reviews_for_user(target.id, 3)
 
             is_self = target.id == interaction.user.id
-            premium_tier = self._has_store_premium(interaction) if is_self else None
-            if premium_tier is not None:
-                await db.set_premium_status(target.id, True)
-            premium_flag = bool(premium_tier) or bool(stored_premium)
+            premium_flag = bool(stored_premium)
 
             trade_label = "trade" if trades == 1 else "trades"
             description_lines = [
@@ -802,39 +613,6 @@ class TraderBot(commands.Bot):
                 initiator_id=interaction.user.id,
             )
 
-        @self.tree.command(description="Set the store post channel for this server")
-        @app_commands.describe(channel="Channel where /poststore submissions will be sent")
-        async def set_trade_channel(
-            interaction: discord.Interaction, channel: discord.TextChannel
-        ):
-            if interaction.guild is None:
-                await interaction.response.send_message(
-                    embed=info_embed("🌐 Guild only", "This command can only be used inside a server."),
-                    ephemeral=True,
-                )
-                return
-
-            perms = getattr(interaction.user, "guild_permissions", None)
-            if not (perms and (perms.manage_guild or perms.administrator)):
-                await interaction.response.send_message(
-                    embed=info_embed(
-                        "🚫 Missing permissions",
-                        "You need Manage Server or Administrator permissions to set the store channel.",
-                    ),
-                    ephemeral=True,
-                )
-                return
-
-            await db.set_trade_channel(interaction.guild.id, channel.id)
-            await db.record_store_channel(interaction.guild.id, channel.id)
-            await interaction.response.send_message(
-                embed=info_embed(
-                    "✅ Store channel saved",
-                    f"Store posts will be sent to {channel.mention}.",
-                ),
-                ephemeral=True,
-            )
-
         @self.tree.command(
             description="Set the channel where trade threads should be created for this server"
         )
@@ -870,13 +648,6 @@ class TraderBot(commands.Bot):
                 ),
                 ephemeral=True,
             )
-
-        @self.tree.command(name="poststore", description="Post your store to the server board")
-        @app_commands.describe(image="Optional image to showcase your items")
-        async def poststore(
-            interaction: discord.Interaction, image: Optional[discord.Attachment] = None
-        ):
-            await self._handle_store_post(interaction, image)
 
     async def _inactivity_watcher(self) -> None:
         await self.wait_until_ready()
@@ -977,35 +748,7 @@ class TraderBot(commands.Bot):
 
                 await self.db.mark_inactivity_warning_sent(trade_id)
 
-    def _has_store_premium(
-        self, interaction: discord.Interaction
-    ) -> StoreTierBenefits | None:
-        entitlements = getattr(interaction, "entitlements", None) or []
-        now = discord.utils.utcnow()
-        best_tier: StoreTierBenefits | None = None
-
-        for entitlement in entitlements:
-            tier = STORE_TIER_BY_SKU.get(getattr(entitlement, "sku_id", None))
-            if tier is None:
-                continue
-
-            ends_at = getattr(entitlement, "ends_at", None)
-            if ends_at is not None and ends_at <= now:
-                continue
-
-            if best_tier is None or tier.rank > best_tier.rank:
-                best_tier = tier
-
-        return best_tier
-
     def _alert_limit(self, interaction: discord.Interaction) -> int:
-        tier = self._has_store_premium(interaction)
-        if tier is None:
-            return 2
-        if tier.rank == 1:
-            return 5
-        if tier.rank == 2:
-            return 10
         return 20
 
     async def _open_trade_thread(
@@ -1131,286 +874,6 @@ class TraderBot(commands.Bot):
             ephemeral=True,
         )
 
-    async def _handle_store_post(
-        self, interaction: discord.Interaction, image: Optional[discord.Attachment]
-    ) -> None:
-        db = self.db
-        if interaction.guild is None:
-            await interaction.response.send_message(
-                embed=info_embed(
-                    "🌐 Guild only", "You can only post store listings inside a server."
-                ),
-                ephemeral=True,
-            )
-            return
-
-        channel_id = await db.get_trade_channel(interaction.guild.id)
-        if channel_id is None:
-            await interaction.response.send_message(
-                embed=info_embed(
-                    "⚙️ Store channel not configured",
-                    "An admin needs to run /set_trade_channel to pick where store posts go.",
-                ),
-                ephemeral=True,
-            )
-            return
-
-        channel = interaction.client.get_channel(channel_id)
-        if channel is None:
-            try:
-                channel = await interaction.client.fetch_channel(channel_id)
-            except discord.HTTPException:
-                channel = None
-
-        if not isinstance(channel, discord.TextChannel):
-            await interaction.response.send_message(
-                embed=info_embed(
-                    "🚫 Channel unavailable",
-                    "I can't find the configured store channel. Please ask an admin to set it again.",
-                ),
-                ephemeral=True,
-            )
-            return
-
-        await db.record_store_channel(interaction.guild.id, channel.id)
-
-        if image and image.content_type and not image.content_type.startswith("image"):
-            await interaction.response.send_message(
-                embed=info_embed(
-                    "🖼️ Invalid image",
-                    "The attachment must be an image file (PNG, JPG, GIF).",
-                ),
-                ephemeral=True,
-            )
-            return
-
-        await db.trim_store_posts(int(time.time()) - STORE_POST_WINDOW_SECONDS * 2)
-
-        now_ts = int(time.time())
-        window_start = now_ts - STORE_POST_WINDOW_SECONDS
-        store_tier = self._has_store_premium(interaction)
-        await db.set_premium_status(interaction.user.id, bool(store_tier))
-        recent_posts, oldest_post = await db.store_post_window(
-            interaction.guild.id, interaction.user.id, window_start
-        )
-        post_limit = store_tier.post_limit if store_tier else DEFAULT_STORE_POST_LIMIT
-        if recent_posts >= post_limit:
-            retry_after = STORE_POST_WINDOW_SECONDS
-            if oldest_post:
-                retry_after = max(0, STORE_POST_WINDOW_SECONDS - (now_ts - oldest_post))
-            await interaction.response.send_message(
-                embed=info_embed(
-                    "⏳ Store cooldown",
-                    (
-                        f"You've reached your store post limit ({post_limit} per hour). "
-                        f"Try again in {_format_duration(int(retry_after))}."
-                    ),
-                ),
-                ephemeral=True,
-            )
-            return
-
-        listing_limit = _store_listing_limit_for_tier(store_tier)
-        badge_url = PREMIUM_BADGE_URL if store_tier else None
-        image_url = image.url if image else None
-        stock = await db.get_stock(interaction.user.id)
-        embeds = await build_store_embeds(
-            interaction.client,
-            db,
-            interaction.user.id,
-            interaction.user.display_name,
-            avatar_url=interaction.user.display_avatar.url,
-            listing_limit=listing_limit,
-            store_tier_name=store_tier.name if store_tier else None,
-            is_premium=bool(store_tier),
-            badge_url=badge_url,
-            image_url=image_url,
-        )
-
-        view = StorePostView(
-            db,
-            interaction.user.id,
-            interaction.user.display_name,
-            listing_limit=listing_limit,
-            store_tier_name=store_tier.name if store_tier else None,
-            is_premium=bool(store_tier),
-            badge_url=badge_url,
-            image_url=image_url,
-        )
-        view.set_page_count(len(embeds))
-        previous_post = await db.get_trade_post(interaction.guild.id, interaction.user.id)
-        if previous_post:
-            prev_channel_id, prev_message_id, *_ = previous_post
-            prev_channel = interaction.client.get_channel(prev_channel_id)
-            if prev_channel is None:
-                try:
-                    prev_channel = await interaction.client.fetch_channel(prev_channel_id)
-                except discord.HTTPException:
-                    prev_channel = None
-
-            if isinstance(prev_channel, discord.TextChannel):
-                try:
-                    message_to_delete = await prev_channel.fetch_message(prev_message_id)
-                    await message_to_delete.delete()
-                except discord.NotFound:
-                    await db.delete_trade_post(interaction.guild.id, interaction.user.id)
-                except discord.HTTPException:
-                    _log.warning(
-                        "Failed to delete previous store post %s for user %s in guild %s",
-                        prev_message_id,
-                        interaction.user.id,
-                        interaction.guild.id,
-            )
-
-        try:
-            message = await channel.send(embed=embeds[0], view=view)
-        except discord.HTTPException:
-            await interaction.response.send_message(
-                embed=info_embed(
-                    "🚫 Cannot post",
-                    f"I don't have permission to send messages in {channel.mention}.",
-                ),
-                ephemeral=True,
-            )
-            return
-
-        await db.record_store_post(interaction.guild.id, interaction.user.id, now_ts)
-        await interaction.response.send_message(
-            embed=info_embed(
-                "🏪 Store posted",
-                f"Your store has been shared in {channel.mention}.",
-            ),
-            ephemeral=True,
-        )
-        await db.save_trade_post(
-            interaction.guild.id,
-            interaction.user.id,
-            channel.id,
-            message.id,
-            listing_limit=listing_limit,
-            store_tier_name=store_tier.name if store_tier else None,
-            is_premium=bool(store_tier),
-            image_url=image_url,
-        )
-        await self._send_alert_notifications(interaction.user, stock)
-
-    async def _update_store_post(self, interaction: discord.Interaction) -> None:
-        if interaction.guild is None:
-            await interaction.response.send_message(
-                embed=info_embed(
-                    "🌐 Guild only", "You can only update store posts inside a server."
-                ),
-                ephemeral=True,
-            )
-            return
-
-        previous_post = await self.db.get_trade_post(
-            interaction.guild.id, interaction.user.id
-        )
-        if not previous_post:
-            await interaction.response.send_message(
-                embed=info_embed(
-                    "📭 No store post found",
-                    "Share your shop with /poststore before trying to refresh it.",
-                ),
-                ephemeral=True,
-            )
-            return
-
-        channel_id, message_id, listing_limit, store_tier_name, is_premium, image_url = (
-            previous_post
-        )
-        channel = interaction.client.get_channel(channel_id)
-        if channel is None:
-            try:
-                channel = await interaction.client.fetch_channel(channel_id)
-            except discord.HTTPException:
-                channel = None
-
-        if not isinstance(channel, discord.TextChannel):
-            await interaction.response.send_message(
-                embed=info_embed(
-                    "🚫 Cannot refresh",
-                    "I can't access your previous store post. Please use /poststore again.",
-                ),
-                ephemeral=True,
-            )
-            return
-
-        try:
-            message = await channel.fetch_message(message_id)
-        except discord.NotFound:
-            await self.db.delete_trade_post(interaction.guild.id, interaction.user.id)
-            await interaction.response.send_message(
-                embed=info_embed(
-                    "📭 No store post found",
-                    "I couldn't find your previous store post. Please use /poststore to share it again.",
-                ),
-                ephemeral=True,
-            )
-            return
-        except discord.HTTPException:
-            await interaction.response.send_message(
-                embed=info_embed(
-                    "🚫 Cannot refresh",
-                    "I couldn't update your store post right now. Please try again later.",
-                ),
-                ephemeral=True,
-            )
-            return
-
-        premium_flag = bool(is_premium)
-        listing_limit = max(
-            1,
-            listing_limit,
-            PREMIUM_STORE_LISTING_LIMIT if premium_flag else DEFAULT_STORE_LISTING_LIMIT,
-        )
-        badge_url = PREMIUM_BADGE_URL if premium_flag else None
-        embeds = await build_store_embeds(
-            interaction.client,
-            self.db,
-            interaction.user.id,
-            interaction.user.display_name,
-            avatar_url=interaction.user.display_avatar.url,
-            listing_limit=listing_limit,
-            store_tier_name=store_tier_name or None,
-            is_premium=premium_flag,
-            badge_url=badge_url,
-            image_url=image_url or None,
-        )
-
-        view = StorePostView(
-            self.db,
-            interaction.user.id,
-            interaction.user.display_name,
-            listing_limit=listing_limit,
-            store_tier_name=store_tier_name or None,
-            is_premium=premium_flag,
-            badge_url=badge_url,
-            image_url=image_url or None,
-        )
-        view.set_page_count(len(embeds))
-
-        try:
-            await message.edit(embed=embeds[0], view=view)
-        except discord.HTTPException:
-            await interaction.response.send_message(
-                embed=info_embed(
-                    "🚫 Cannot refresh",
-                    "I couldn't update your store post right now. Please try again later.",
-                ),
-                ephemeral=True,
-            )
-            return
-
-        await interaction.response.send_message(
-            embed=info_embed(
-                "✅ Store refreshed",
-                "Your existing store post has been updated without creating a new one.",
-            ),
-            ephemeral=True,
-        )
-
     async def _send_alert_notifications(
         self, poster: discord.abc.User | discord.Member, stock: list[Tuple[str, int]]
     ) -> None:
@@ -1460,7 +923,7 @@ class TraderBot(commands.Bot):
             embed = discord.Embed(
                 title="🔔 Item alert matched",
                 description=(
-                    f"<@{poster.id}> just posted a store with item(s) you're watching."
+                    f"<@{poster.id}> just updated their inventory with item(s) you're watching."
                 ),
                 color=color,
             )
@@ -1479,8 +942,7 @@ class TraderBot(commands.Bot):
                 await target.send(
                     embed=embed,
                     content=(
-                        "Interested? Head to your server's trade channel to reply on their post. "
-                        "DM trading is disabled—keep the conversation in-channel."
+                        "Interested? Reach out in your server's trade channel to coordinate."
                     ),
                 )
             except discord.HTTPException:
@@ -1490,11 +952,19 @@ class TraderBot(commands.Bot):
 
 
 class StockGroup(app_commands.Group):
-    def __init__(self, db: Database):
-        super().__init__(name="stock", description="Manage your stock list")
+    def __init__(
+        self,
+        db: Database,
+        alert_notifier: Callable[
+            [discord.abc.User | discord.Member, list[Tuple[str, int]]], Awaitable[None]
+        ]
+        | None = None,
+    ):
+        super().__init__(name="stock", description="Manage your inventory list")
         self.db = db
+        self._alert_notifier = alert_notifier
 
-    @app_commands.command(name="add", description="Add an item to your stock list")
+    @app_commands.command(name="add", description="Add an item to your inventory list")
     @app_commands.describe(item="Item name", quantity="How many you have")
     async def add(self, interaction: discord.Interaction, item: str, quantity: int = 1):
         qty = max(1, quantity)
@@ -1508,28 +978,42 @@ class StockGroup(app_commands.Group):
             return
 
         stock = await self.db.get_stock(interaction.user.id)
+        match_note = ""
+        if stock:
+            names = [name for name, _ in stock]
+            match = process.extractOne(item_name, names, scorer=fuzz.WRatio)
+            if match and match[1] >= 90:
+                if match[0].lower() != item_name.lower():
+                    match_note = f" (matched **{match[0]}**)"
+                item_name = match[0]
+
         if not any(name.lower() == item_name.lower() for name, _ in stock):
-            if await _enforce_listing_limit(interaction, len(stock), "stock"):
+            if await _enforce_listing_limit(interaction, len(stock), "inventory"):
                 return
 
         await self.db.add_stock(interaction.user.id, item_name, qty)
         embed = info_embed(
-            "📦 Stock updated", f"Added **{item_name}** x{qty} to your inventory."
+            "📦 Inventory updated",
+            f"Added **{item_name}** x{qty} to your inventory.{match_note}",
         )
         await _send_interaction_message(interaction, embed=embed, ephemeral=True)
+        if self._alert_notifier:
+            stock = await self.db.get_stock(interaction.user.id)
+            await self._alert_notifier(interaction.user, stock)
 
     @app_commands.command(
-        name="change", description="Change the quantity for an item in your stock list"
+        name="change",
+        description="Change the quantity for an item in your inventory list",
     )
     @app_commands.describe(
-        item="Item to update (fuzzy matched against your stock)",
+        item="Item to update (fuzzy matched against your inventory)",
         quantity="New quantity you have",
     )
     async def change(self, interaction: discord.Interaction, item: str, quantity: int):
         stock = await self.db.get_stock(interaction.user.id)
         if not stock:
             await interaction.response.send_message(
-                embed=info_embed("No stock found", "Add something first to change it."),
+                embed=info_embed("No inventory found", "Add something first to change it."),
                 ephemeral=True,
             )
             return
@@ -1548,7 +1032,7 @@ class StockGroup(app_commands.Group):
             await interaction.response.send_message(
                 embed=info_embed(
                     "🔍 No close match",
-                    "I couldn't find anything that looks like that in your stock.",
+                    "I couldn't find anything that looks like that in your inventory.",
                 ),
                 ephemeral=True,
             )
@@ -1560,20 +1044,23 @@ class StockGroup(app_commands.Group):
         await self.db.update_stock_quantity(interaction.user.id, best_name, new_qty)
 
         if new_qty == 0:
-            message = f"Removed **{best_name}** from your stock."
+            message = f"Removed **{best_name}** from your inventory."
         else:
             message = f"Updated **{best_name}** to x{new_qty} (was x{current_qty})."
 
         await interaction.response.send_message(
-            embed=info_embed("📦 Stock updated", message),
+            embed=info_embed("📦 Inventory updated", message),
             ephemeral=True,
         )
+        if self._alert_notifier and new_qty > 0:
+            stock = await self.db.get_stock(interaction.user.id)
+            await self._alert_notifier(interaction.user, stock)
 
     async def show(self, interaction: discord.Interaction, user: Optional[discord.User] = None):
         target = user or interaction.user
         if not _can_view_other(interaction, target):
             await interaction.response.send_message(
-                embed=info_embed("🚫 Permission denied", "You can only view your own stock."),
+                embed=info_embed("🚫 Permission denied", "You can only view your own inventory."),
                 ephemeral=True,
             )
             return
@@ -1583,21 +1070,21 @@ class StockGroup(app_commands.Group):
 
     async def clear_list(self, interaction: discord.Interaction):
         await self.db.clear_stock(interaction.user.id)
-        embed = info_embed("🗑️ Stock cleared", "Your inventory list is now empty.")
+        embed = info_embed("🗑️ Inventory cleared", "Your inventory list is now empty.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="view", description="View stock for you or another member")
+    @app_commands.command(name="view", description="View inventory for you or another member")
     @app_commands.describe(user="Member to view")
     async def view(self, interaction: discord.Interaction, user: Optional[discord.User] = None):
         await self.show(interaction, user)
 
-    @app_commands.command(name="remove", description="Remove an item from your stock list")
-    @app_commands.describe(item="Item to remove (fuzzy matched against your stock)")
+    @app_commands.command(name="remove", description="Remove an item from your inventory list")
+    @app_commands.describe(item="Item to remove (fuzzy matched against your inventory)")
     async def remove(self, interaction: discord.Interaction, item: str):
         stock = await self.db.get_stock(interaction.user.id)
         if not stock:
             await interaction.response.send_message(
-                embed=info_embed("No stock found", "Add something first to remove it."),
+                embed=info_embed("No inventory found", "Add something first to remove it."),
                 ephemeral=True,
             )
             return
@@ -1616,7 +1103,7 @@ class StockGroup(app_commands.Group):
             await interaction.response.send_message(
                 embed=info_embed(
                     "🔍 No close match",
-                    "I couldn't find anything that looks like that in your stock.",
+                    "I couldn't find anything that looks like that in your inventory.",
                 ),
                 ephemeral=True,
             )
@@ -1625,14 +1112,16 @@ class StockGroup(app_commands.Group):
         best_name = match[0]
         removed = await self.db.remove_stock(interaction.user.id, best_name)
         message = (
-            f"Removed **{best_name}** from your stock." if removed else "Item not found anymore."
+            f"Removed **{best_name}** from your inventory."
+            if removed
+            else "Item not found anymore."
         )
         await interaction.response.send_message(
-            embed=info_embed("🧹 Stock cleanup", message),
+            embed=info_embed("🧹 Inventory cleanup", message),
             ephemeral=True,
         )
 
-    @app_commands.command(name="clear", description="Clear all items from your stock list")
+    @app_commands.command(name="clear", description="Clear all items from your inventory list")
     async def clear(self, interaction: discord.Interaction):
         await self.clear_list(interaction)
 
@@ -1832,7 +1321,7 @@ class ConfirmClearView(discord.ui.View):
 
 class StockAddModal(discord.ui.Modal):
     def __init__(self, handler: StockGroup):
-        super().__init__(title="Add to stock")
+        super().__init__(title="Add to inventory")
         self._handler = handler
         self.item_input = discord.ui.TextInput(
             label="Item",
@@ -1886,10 +1375,10 @@ class WishlistAddModal(discord.ui.Modal):
 
 class RemoveStockModal(discord.ui.Modal):
     def __init__(self, handler: StockGroup):
-        super().__init__(title="Remove from stock")
+        super().__init__(title="Remove from inventory")
         self._handler = handler
         self.item_input = discord.ui.TextInput(
-            label="Stock item",
+            label="Inventory item",
             placeholder="What do you want to remove?",
             max_length=100,
         )
@@ -1898,6 +1387,34 @@ class RemoveStockModal(discord.ui.Modal):
     async def on_submit(self, interaction: discord.Interaction) -> None:
         await self._handler.remove.callback(
             self._handler, interaction, (self.item_input.value or "").strip()
+        )
+
+
+class StockChangeModal(discord.ui.Modal):
+    def __init__(self, handler: StockGroup):
+        super().__init__(title="Update inventory quantity")
+        self._handler = handler
+        self.item_input = discord.ui.TextInput(
+            label="Inventory item",
+            placeholder="Which item should be updated?",
+            max_length=100,
+        )
+        self.quantity_input = discord.ui.TextInput(
+            label="New quantity",
+            placeholder="0 to remove",
+            max_length=5,
+        )
+        self.add_item(self.item_input)
+        self.add_item(self.quantity_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        raw_qty = (self.quantity_input.value or "").strip()
+        try:
+            qty = int(raw_qty)
+        except ValueError:
+            qty = 1
+        await self._handler.change.callback(
+            self._handler, interaction, (self.item_input.value or "").strip(), qty
         )
 
 
@@ -1991,23 +1508,11 @@ class TimezoneModal(discord.ui.Modal):
         )
 
 
-class TradeMenuView(discord.ui.View):
-    def __init__(
-        self,
-        db: Database,
-        stock_handler: StockGroup,
-        wishlist_handler: WishlistGroup,
-        alert_handler: AlertGroup,
-        store_post_handler: Callable[[discord.Interaction, Optional[discord.Attachment]], Awaitable[None]],
-        store_update_handler: Callable[[discord.Interaction], Awaitable[None]],
-    ):
+class InventoryMenuView(discord.ui.View):
+    def __init__(self, db: Database, stock_handler: StockGroup):
         super().__init__(timeout=600)
         self.db = db
         self._stock_handler = stock_handler
-        self._wishlist_handler = wishlist_handler
-        self._alert_handler = alert_handler
-        self._store_post_handler = store_post_handler
-        self._store_update_handler = store_update_handler
 
     async def _confirm_clear_stock(self, interaction: discord.Interaction) -> None:
         async def confirm(inter: discord.Interaction) -> None:
@@ -2017,7 +1522,7 @@ class TradeMenuView(discord.ui.View):
                     await inter.followup.edit_message(
                         inter.message.id,
                         embed=info_embed(
-                            "🧹 Stock cleared", "Your inventory list is now empty."
+                            "🧹 Inventory cleared", "Your inventory list is now empty."
                         ),
                         view=None,
                     )
@@ -2026,73 +1531,43 @@ class TradeMenuView(discord.ui.View):
 
         view = ConfirmClearView(confirm)
         await interaction.response.send_message(
-            embed=info_embed("Confirm", "This will remove all stock entries."),
+            embed=info_embed("Confirm", "This will remove all inventory entries."),
             view=view,
             ephemeral=True,
         )
 
-    @discord.ui.button(label="View Stock", style=discord.ButtonStyle.secondary, emoji="📦", row=0)
+    @discord.ui.button(label="View Inventory", style=discord.ButtonStyle.secondary, emoji="📦", row=0)
     async def stock_view(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self._stock_handler.show(interaction, None)
 
-    @discord.ui.button(label="Add Stock", style=discord.ButtonStyle.primary, emoji="🧺", row=0)
+    @discord.ui.button(label="Add Item", style=discord.ButtonStyle.primary, emoji="🧺", row=0)
     async def stock_add(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.send_modal(StockAddModal(self._stock_handler))
 
-    @discord.ui.button(label="Remove Stock", style=discord.ButtonStyle.secondary, emoji="➖", row=0)
+    @discord.ui.button(label="Adjust Quantity", style=discord.ButtonStyle.primary, emoji="🧮", row=0)
+    async def stock_change(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(StockChangeModal(self._stock_handler))
+
+    @discord.ui.button(label="Remove Item", style=discord.ButtonStyle.secondary, emoji="➖", row=1)
     async def stock_remove(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.send_modal(RemoveStockModal(self._stock_handler))
 
-    @discord.ui.button(label="Clear Stock", style=discord.ButtonStyle.danger, emoji="🧹", row=0)
+    @discord.ui.button(label="Clear Inventory", style=discord.ButtonStyle.danger, emoji="🧹", row=1)
     async def stock_clear(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self._confirm_clear_stock(interaction)
 
-    @discord.ui.button(label="View Wishlist", style=discord.ButtonStyle.secondary, emoji="📋", row=1)
-    async def wishlist_view(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self._wishlist_handler.show(interaction, None)
-
-    @discord.ui.button(label="Add Wishlist", style=discord.ButtonStyle.primary, emoji="📌", row=1)
-    async def wishlist_add(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await interaction.response.send_modal(WishlistAddModal(self._wishlist_handler))
-
-    @discord.ui.button(
-        label="Remove Wishlist", style=discord.ButtonStyle.secondary, emoji="🗑️", row=1
-    )
-    async def wishlist_remove(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await interaction.response.send_modal(RemoveWishlistModal(self._wishlist_handler))
-
-    @discord.ui.button(label="View Alerts", style=discord.ButtonStyle.secondary, emoji="🔔", row=2)
-    async def alerts_view(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self._alert_handler.show(interaction)
-
-    @discord.ui.button(label="Add Alert", style=discord.ButtonStyle.primary, emoji="➕", row=2)
-    async def alerts_add(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await interaction.response.send_modal(AlertAddModal(self._alert_handler))
-
-    @discord.ui.button(label="Remove Alert", style=discord.ButtonStyle.secondary, emoji="➖", row=2)
-    async def alerts_remove(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await interaction.response.send_modal(AlertRemoveModal(self._alert_handler))
-
-    @discord.ui.button(label="Set Bio", style=discord.ButtonStyle.secondary, emoji="✍️", row=3)
+    @discord.ui.button(label="Set Bio", style=discord.ButtonStyle.secondary, emoji="✍️", row=2)
     async def set_bio(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.send_modal(BioModal(self.db))
 
-    @discord.ui.button(label="Set Time Zone", style=discord.ButtonStyle.secondary, emoji="🕰️", row=3)
+    @discord.ui.button(label="Set Time Zone", style=discord.ButtonStyle.secondary, emoji="🕰️", row=2)
     async def set_timezone(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.send_modal(TimezoneModal(self.db))
 
-    @discord.ui.button(label="Update Store", style=discord.ButtonStyle.primary, emoji="♻️", row=3)
-    async def update_store(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self._store_update_handler(interaction)
-
-    @discord.ui.button(label="Post Store", style=discord.ButtonStyle.primary, emoji="🏪", row=3)
-    async def poststore(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self._store_post_handler(interaction, None)
-
-    @discord.ui.button(label="Close", style=discord.ButtonStyle.primary, emoji="🚪", row=3)
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.primary, emoji="🚪", row=2)
     async def close(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.edit_message(
-            embed=info_embed("Closed", "You can reopen /store anytime."), view=None
+            embed=info_embed("Closed", "You can reopen /inventory anytime."), view=None
         )
 
 
@@ -2329,120 +1804,6 @@ class ReviewModal(discord.ui.Modal):
         await interaction.response.send_message(embed=embed, ephemeral=True)
         if saved and self._on_complete is not None:
             await self._on_complete(interaction)
-
-
-class StorePostView(BasePersistentView):
-    def __init__(
-        self,
-        db: Database,
-        poster_id: int,
-        poster_name: str | None = None,
-        *,
-        listing_limit: int = DEFAULT_STORE_LISTING_LIMIT,
-        store_tier_name: str | None = None,
-        is_premium: bool = False,
-        badge_url: str | None = None,
-        image_url: str | None = None,
-    ):
-        super().__init__()
-        self.db = db
-        self.poster_id = poster_id
-        self.poster_name = poster_name or ""
-        self.listing_limit = listing_limit or DEFAULT_STORE_LISTING_LIMIT
-        self.store_tier_name = store_tier_name or None
-        self.is_premium = is_premium
-        self.badge_url = badge_url
-        self.image_url = image_url
-        self.current_page = 0
-        self.page_count = 1
-        self.start_trade.custom_id = f"store:start:{poster_id}"
-        self.previous_page.custom_id = f"store:page:{poster_id}:prev"
-        self.next_page.custom_id = f"store:page:{poster_id}:next"
-        self._sync_nav_buttons()
-
-    def set_page_count(self, count: int) -> None:
-        self.page_count = max(1, count)
-        self._sync_nav_buttons()
-
-    def _sync_nav_buttons(self) -> None:
-        disable_nav = self.page_count <= 1
-        self.previous_page.disabled = disable_nav
-        self.next_page.disabled = disable_nav
-
-    async def _load_pages(self, interaction: discord.Interaction) -> list[discord.Embed]:
-        try:
-            user = interaction.client.get_user(self.poster_id) or await interaction.client.fetch_user(
-                self.poster_id
-            )
-            avatar_url = user.display_avatar.url
-            display_name = user.display_name
-        except discord.HTTPException:
-            avatar_url = None
-            display_name = self.poster_name or f"User {self.poster_id}"
-
-        embeds = await build_store_embeds(
-            interaction.client,
-            self.db,
-            self.poster_id,
-            display_name,
-            avatar_url=avatar_url,
-            listing_limit=self.listing_limit,
-            store_tier_name=self.store_tier_name,
-            is_premium=self.is_premium,
-            badge_url=self.badge_url,
-            image_url=self.image_url,
-        )
-        self.set_page_count(len(embeds))
-        return embeds
-
-    async def _change_page(self, interaction: discord.Interaction, delta: int) -> None:
-        embeds = await self._load_pages(interaction)
-        total = len(embeds) or 1
-        self.current_page = (self.current_page + delta) % total
-        self._sync_nav_buttons()
-        await interaction.response.edit_message(embed=embeds[self.current_page], view=self)
-
-    @discord.ui.button(label="Contact Seller", style=discord.ButtonStyle.primary, emoji="🤝")
-    async def start_trade(self, interaction: discord.Interaction, _: discord.ui.Button):
-        if interaction.user.id == self.poster_id:
-            await interaction.response.send_message(
-                embed=info_embed("⚠️ Invalid trade", "You cannot start a trade with yourself."),
-                ephemeral=True,
-            )
-            return
-
-        bot = getattr(interaction, "client", None)
-        if not isinstance(bot, TraderBot):
-            await interaction.response.send_message(
-                embed=info_embed(
-                    "🚫 Unsupported action", "Please start this trade with the main trader bot."
-                ),
-                ephemeral=True,
-            )
-            return
-
-        item_label = f"Store trade with {self.poster_name or 'seller'}"
-        await bot._open_trade_thread(
-            interaction,
-            seller_id=self.poster_id,
-            buyer_id=interaction.user.id,
-            item=item_label,
-            initiator_id=interaction.user.id,
-        )
-
-    @discord.ui.button(emoji="◀️", style=discord.ButtonStyle.secondary)
-    async def previous_page(self, interaction: discord.Interaction, _: discord.ui.Button):
-        if self.page_count <= 1:
-            await interaction.response.defer(ephemeral=True)
-            return
-        await self._change_page(interaction, -1)
-
-    @discord.ui.button(emoji="▶️", style=discord.ButtonStyle.secondary)
-    async def next_page(self, interaction: discord.Interaction, _: discord.ui.Button):
-        if self.page_count <= 1:
-            await interaction.response.defer(ephemeral=True)
-            return
-        await self._change_page(interaction, 1)
 
 
 class TradeView(BasePersistentView):
