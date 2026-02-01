@@ -114,37 +114,8 @@ class Database:
 
                 CREATE TABLE IF NOT EXISTS guild_settings (
                     guild_id INTEGER PRIMARY KEY,
-                    trade_channel_id INTEGER,
                     trade_thread_channel_id INTEGER
                 );
-
-                CREATE TABLE IF NOT EXISTS store_channel_logs (
-                    guild_id INTEGER NOT NULL,
-                    channel_id INTEGER NOT NULL,
-                    created_at INTEGER NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_store_channel_logs_guild_channel
-                    ON store_channel_logs(guild_id, channel_id, created_at DESC);
-
-                CREATE TABLE IF NOT EXISTS trade_posts (
-                    guild_id INTEGER NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    channel_id INTEGER NOT NULL,
-                    message_id INTEGER NOT NULL,
-                    listing_limit INTEGER DEFAULT 0,
-                    store_tier_name TEXT DEFAULT '',
-                    is_premium INTEGER DEFAULT 0,
-                    image_url TEXT DEFAULT '',
-                    PRIMARY KEY (guild_id, user_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS store_post_logs (
-                    guild_id INTEGER NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    created_at INTEGER NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_store_post_logs_window
-                    ON store_post_logs(guild_id, user_id, created_at DESC);
 
                 CREATE TABLE IF NOT EXISTS active_trades (
                     user_id INTEGER PRIMARY KEY,
@@ -161,9 +132,7 @@ class Database:
             await db.commit()
             await self._ensure_trade_columns(db)
             await self._ensure_user_columns(db)
-            await self._ensure_trade_post_columns(db)
             await self._ensure_guild_settings_columns(db)
-            await self._ensure_store_channel_logs(db)
 
     def _connect(self) -> aiosqlite.Connection:
         return aiosqlite.connect(self.path)
@@ -222,19 +191,6 @@ class Database:
             await db.execute("ALTER TABLE users ADD COLUMN is_premium INTEGER DEFAULT 0")
         await db.commit()
 
-    async def _ensure_trade_post_columns(self, db: aiosqlite.Connection) -> None:
-        cursor = await db.execute("PRAGMA table_info(trade_posts)")
-        columns = {row[1] for row in await cursor.fetchall()}
-        if "listing_limit" not in columns:
-            await db.execute("ALTER TABLE trade_posts ADD COLUMN listing_limit INTEGER DEFAULT 0")
-        if "store_tier_name" not in columns:
-            await db.execute("ALTER TABLE trade_posts ADD COLUMN store_tier_name TEXT DEFAULT ''")
-        if "is_premium" not in columns:
-            await db.execute("ALTER TABLE trade_posts ADD COLUMN is_premium INTEGER DEFAULT 0")
-        if "image_url" not in columns:
-            await db.execute("ALTER TABLE trade_posts ADD COLUMN image_url TEXT DEFAULT ''")
-        await db.commit()
-
     async def _ensure_guild_settings_columns(self, db: aiosqlite.Connection) -> None:
         cursor = await db.execute("PRAGMA table_info(guild_settings)")
         columns = {row[1] for row in await cursor.fetchall()}
@@ -242,27 +198,6 @@ class Database:
             await db.execute(
                 "ALTER TABLE guild_settings ADD COLUMN trade_thread_channel_id INTEGER"
             )
-        await db.commit()
-
-    async def _ensure_store_channel_logs(self, db: aiosqlite.Connection) -> None:
-        cursor = await db.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'store_channel_logs'"
-        )
-        exists = await cursor.fetchone()
-        if exists:
-            return
-
-        await db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS store_channel_logs (
-                guild_id INTEGER NOT NULL,
-                channel_id INTEGER NOT NULL,
-                created_at INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_store_channel_logs_guild_channel
-                ON store_channel_logs(guild_id, channel_id, created_at DESC);
-            """
-        )
         await db.commit()
 
     async def ensure_user(self, user_id: int) -> None:
@@ -1099,99 +1034,6 @@ class Database:
                 await db.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
                 await db.commit()
 
-    async def list_trade_posts(self) -> List[Tuple[int, int, int, int, int, str, int, str]]:
-        async with self._connect() as db:
-            cursor = await db.execute(
-                "SELECT guild_id, user_id, channel_id, message_id, listing_limit, store_tier_name, is_premium, image_url FROM trade_posts"
-            )
-            return await cursor.fetchall()
-
-    async def store_post_window(
-        self, guild_id: int, user_id: int, since_timestamp: int
-    ) -> Tuple[int, Optional[int]]:
-        async with self._connect() as db:
-            cursor = await db.execute(
-                "SELECT COUNT(*), MIN(created_at) FROM store_post_logs\n"
-                "WHERE guild_id = ? AND user_id = ? AND created_at >= ?",
-                (guild_id, user_id, since_timestamp),
-            )
-            row = await cursor.fetchone()
-            if row is None:
-                return 0, None
-            return (row[0] or 0, row[1])
-
-    async def record_store_post(
-        self, guild_id: int, user_id: int, timestamp: Optional[int] = None
-    ) -> None:
-        if timestamp is None:
-            timestamp = int(time.time())
-
-        async with self._lock:
-            async with self._connect() as db:
-                await db.execute(
-                    "INSERT INTO store_post_logs(guild_id, user_id, created_at) VALUES (?, ?, ?)",
-                    (guild_id, user_id, timestamp),
-                )
-                await db.commit()
-
-    async def trim_store_posts(self, cutoff_timestamp: int) -> None:
-        async with self._lock:
-            async with self._connect() as db:
-                await db.execute(
-                    "DELETE FROM store_post_logs WHERE created_at < ?", (cutoff_timestamp,)
-                )
-                await db.commit()
-
-    async def get_trade_post(
-        self, guild_id: int, user_id: int
-    ) -> Tuple[int, int, int, str, int, str] | None:
-        async with self._connect() as db:
-            cursor = await db.execute(
-                "SELECT channel_id, message_id, listing_limit, store_tier_name, is_premium, image_url\n"
-                "FROM trade_posts WHERE guild_id = ? AND user_id = ?",
-                (guild_id, user_id),
-            )
-            return await cursor.fetchone()
-
-    async def save_trade_post(
-        self,
-        guild_id: int,
-        user_id: int,
-        channel_id: int,
-        message_id: int,
-        *,
-        listing_limit: int = 0,
-        store_tier_name: str | None = None,
-        is_premium: bool = False,
-        image_url: str | None = None,
-    ) -> None:
-        async with self._lock:
-            async with self._connect() as db:
-                await db.execute(
-                    "INSERT INTO trade_posts(guild_id, user_id, channel_id, message_id, listing_limit, store_tier_name, is_premium, image_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)\n"
-                    "ON CONFLICT(guild_id, user_id) DO UPDATE SET channel_id = excluded.channel_id, message_id = excluded.message_id, listing_limit = excluded.listing_limit, store_tier_name = excluded.store_tier_name, is_premium = excluded.is_premium, image_url = excluded.image_url",
-                    (
-                        guild_id,
-                        user_id,
-                        channel_id,
-                        message_id,
-                        listing_limit,
-                        store_tier_name or "",
-                        int(is_premium),
-                        image_url or "",
-                    ),
-                )
-                await db.commit()
-
-    async def delete_trade_post(self, guild_id: int, user_id: int) -> None:
-        async with self._lock:
-            async with self._connect() as db:
-                await db.execute(
-                    "DELETE FROM trade_posts WHERE guild_id = ? AND user_id = ?",
-                    (guild_id, user_id),
-                )
-                await db.commit()
-
     async def dump_state(self) -> Iterable[Tuple[str, Tuple]]:
         """Used for debugging and tests to inspect stored state."""
         async with self._connect() as db:
@@ -1205,34 +1047,10 @@ class Database:
                 "trade_feedback",
                 "trade_reviews",
                 "guild_settings",
-                "store_post_logs",
-                "store_channel_logs",
             ]:
                 cursor = await db.execute(f"SELECT * FROM {table}")
                 for row in await cursor.fetchall():
                     yield table, row
-
-    async def set_trade_channel(self, guild_id: int, channel_id: Optional[int]) -> None:
-        """Persist the configured trade post channel for a guild."""
-
-        async with self._lock:
-            async with self._connect() as db:
-                await db.execute(
-                    "INSERT INTO guild_settings(guild_id, trade_channel_id) VALUES (?, ?)\n"
-                    "ON CONFLICT(guild_id) DO UPDATE SET trade_channel_id = excluded.trade_channel_id",
-                    (guild_id, channel_id),
-                )
-                await db.commit()
-
-    async def get_trade_channel(self, guild_id: int) -> Optional[int]:
-        """Return the configured trade post channel, if present."""
-
-        async with self._connect() as db:
-            cursor = await db.execute(
-                "SELECT trade_channel_id FROM guild_settings WHERE guild_id = ?", (guild_id,)
-            )
-            row = await cursor.fetchone()
-            return row[0] if row else None
 
     async def set_trade_thread_channel(
         self, guild_id: int, channel_id: Optional[int]
@@ -1258,23 +1076,3 @@ class Database:
             )
             row = await cursor.fetchone()
             return row[0] if row else None
-
-    async def record_store_channel(self, guild_id: int, channel_id: int) -> None:
-        """Record guild/channel pairs that should receive store posts."""
-
-        async with self._lock:
-            async with self._connect() as db:
-                await db.execute(
-                    "INSERT INTO store_channel_logs(guild_id, channel_id, created_at) VALUES (?, ?, ?)",
-                    (guild_id, channel_id, int(time.time())),
-                )
-                await db.commit()
-
-    async def list_store_channels(self) -> List[Tuple[int, int]]:
-        """Return unique guild/channel pairs configured for store posts."""
-
-        async with self._connect() as db:
-            cursor = await db.execute(
-                "SELECT DISTINCT guild_id, channel_id FROM store_channel_logs"
-            )
-            return await cursor.fetchall()
