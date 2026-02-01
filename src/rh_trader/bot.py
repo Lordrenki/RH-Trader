@@ -1140,7 +1140,9 @@ class TraderBot(commands.Bot):
                 item = items.get(slug)
                 if item is not None and isinstance(item.trade_value, int) and item.trade_value > 0:
                     chosen.append(item)
-            description_lines.extend(format_trade_value_lines(chosen))
+            description_lines.extend(
+                format_trade_value_lines(chosen, include_game_value=False)
+            )
             title = "RaiderMarket Trade Values (Watchlist)"
         else:
             ranked = sorted(
@@ -1153,7 +1155,9 @@ class TraderBot(commands.Bot):
                 reverse=True,
             )
             top_items = ranked[:RAIDERMARKET_TOP_COUNT]
-            description_lines.extend(format_trade_value_lines(top_items))
+            description_lines.extend(
+                format_trade_value_lines(top_items, include_game_value=False)
+            )
             title = f"RaiderMarket Top {len(top_items)} Trade Values"
 
         if not description_lines:
