@@ -68,6 +68,26 @@ def _extract_slug_from_record(record: dict[str, Any]) -> str | None:
     url = record.get("url") or record.get("href")
     if isinstance(url, str):
         return _extract_slug(url.strip())
+    nested = record.get("item") or record.get("itemData") or record.get("itemInfo")
+    if isinstance(nested, dict):
+        return _extract_slug_from_record(nested)
+    return None
+
+
+def _extract_name_from_record(record: dict[str, Any]) -> str | None:
+    name = (
+        record.get("name")
+        or record.get("itemName")
+        or record.get("displayName")
+        or record.get("title")
+    )
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    nested = record.get("item") or record.get("itemData") or record.get("itemInfo")
+    if isinstance(nested, dict):
+        nested_name = nested.get("name") or nested.get("itemName") or nested.get("displayName")
+        if isinstance(nested_name, str) and nested_name.strip():
+            return nested_name.strip()
     return None
 
 
@@ -86,26 +106,50 @@ def _parse_items_from_json(data: Any) -> dict[str, RaiderMarketItem]:
     items: dict[str, RaiderMarketItem] = {}
     for record in _iter_item_records(data):
         slug = _extract_slug_from_record(record)
-        name = record.get("name")
-        if not slug or not isinstance(name, str) or not name.strip():
+        name = _extract_name_from_record(record)
+        if not slug or not name:
             continue
         trade_value = _coerce_int(
             record.get("tradeValue")
             or record.get("trade_value")
             or record.get("trade")
             or record.get("tradevalue")
+            or record.get("tradeValueScrap")
+            or record.get("trade_value_scrap")
+            or record.get("tradeValueInScrap")
+            or record.get("tradeValueRaw")
+            or record.get("trade_value_raw")
         )
+        if trade_value is None and isinstance(record.get("item"), dict):
+            trade_value = _coerce_int(
+                record["item"].get("tradeValue")
+                or record["item"].get("trade_value")
+                or record["item"].get("tradeValueScrap")
+                or record["item"].get("tradeValueInScrap")
+            )
         game_value = _coerce_int(
             record.get("gameValue")
             or record.get("game_value")
             or record.get("game")
             or record.get("gamevalue")
+            or record.get("gameValueScrap")
+            or record.get("game_value_scrap")
+            or record.get("gameValueInScrap")
+            or record.get("gameValueRaw")
+            or record.get("game_value_raw")
         )
+        if game_value is None and isinstance(record.get("item"), dict):
+            game_value = _coerce_int(
+                record["item"].get("gameValue")
+                or record["item"].get("game_value")
+                or record["item"].get("gameValueScrap")
+                or record["item"].get("gameValueInScrap")
+            )
         items.setdefault(
             slug,
             RaiderMarketItem(
                 slug=slug,
-                name=name.strip(),
+                name=name,
                 trade_value=trade_value,
                 game_value=game_value,
                 url=f"https://raidermarket.com/item/{slug}",
