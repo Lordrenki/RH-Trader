@@ -25,7 +25,7 @@ from .embeds import (
     info_embed,
     rep_level_summary,
 )
-from .raider_market import BROWSE_URL, fetch_browse_items, format_trade_value_lines
+from .raider_market import fetch_browse_items, format_trade_value_lines
 
 _log = logging.getLogger(__name__)
 QUICK_RATING_COOLDOWN_SECONDS = 24 * 60 * 60
@@ -798,11 +798,11 @@ class TraderBot(commands.Bot):
         )
         @app_commands.describe(
             channel="Channel to post RaiderMarket trade values",
-            watchlist="Comma-separated RaiderMarket item slugs or item URLs",
+            watchlist="Optional comma-separated RaiderMarket item slugs or item URLs",
         )
         async def trade_values_watchlist(
             interaction: discord.Interaction,
-            watchlist: str,
+            watchlist: Optional[str] = None,
             channel: Optional[discord.TextChannel] = None,
         ):
             if interaction.guild is None:
@@ -872,11 +872,13 @@ class TraderBot(commands.Bot):
             else:
                 await db.update_raidermarket_watchlist(interaction.guild.id, slugs)
                 response_title = "✅ Watchlist updated"
+            status_line = (
+                f"Tracking {len(slugs)} item(s) now."
+                if slugs
+                else "Tracking top trade values automatically."
+            )
             await interaction.response.send_message(
-                embed=info_embed(
-                    response_title,
-                    f"Tracking {len(slugs)} item(s) now.",
-                ),
+                embed=info_embed(response_title, status_line),
                 ephemeral=True,
             )
             await self._refresh_raidermarket_panels(
@@ -1136,13 +1138,17 @@ class TraderBot(commands.Bot):
             chosen = []
             for slug in watchlist:
                 item = items.get(slug)
-                if item is not None and isinstance(item.trade_value, int):
+                if item is not None and isinstance(item.trade_value, int) and item.trade_value > 0:
                     chosen.append(item)
             description_lines.extend(format_trade_value_lines(chosen))
             title = "RaiderMarket Trade Values (Watchlist)"
         else:
             ranked = sorted(
-                (entry for entry in items.values() if isinstance(entry.trade_value, int)),
+                (
+                    entry
+                    for entry in items.values()
+                    if isinstance(entry.trade_value, int) and entry.trade_value > 0
+                ),
                 key=lambda entry: entry.trade_value,
                 reverse=True,
             )
@@ -1164,7 +1170,7 @@ class TraderBot(commands.Bot):
                 description="\n".join(chunk),
                 color=DEFAULT_EMBED_COLOR,
             )
-            embed.set_footer(text=f"Last updated: {timestamp} • Source: {BROWSE_URL}")
+            embed.set_footer(text=f"Last updated: {timestamp}")
             embeds.append(embed)
         return embeds
 

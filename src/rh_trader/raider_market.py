@@ -92,7 +92,7 @@ def format_trade_value_lines(
     lines = []
     for item in items:
         trade_value = item.trade_value
-        if not isinstance(trade_value, int):
+        if not isinstance(trade_value, int) or trade_value <= 0:
             continue
         game_value = item.game_value
         trade_label = f"{trade_value:,}"
