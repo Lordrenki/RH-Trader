@@ -133,7 +133,8 @@ class Database:
                     guild_id INTEGER PRIMARY KEY,
                     channel_id INTEGER NOT NULL,
                     message_id INTEGER NOT NULL,
-                    watchlist TEXT DEFAULT ''
+                    watchlist TEXT DEFAULT '',
+                    extra_message_ids TEXT DEFAULT ''
                 );
                 """
             )
@@ -217,6 +218,10 @@ class Database:
             await db.execute(
                 "ALTER TABLE raidermarket_panels ADD COLUMN watchlist TEXT DEFAULT ''"
             )
+        if "extra_message_ids" not in columns:
+            await db.execute(
+                "ALTER TABLE raidermarket_panels ADD COLUMN extra_message_ids TEXT DEFAULT ''"
+            )
         await db.commit()
 
     async def upsert_raidermarket_panel(
@@ -225,19 +230,28 @@ class Database:
         channel_id: int,
         message_id: int,
         watchlist: List[str],
+        extra_message_ids: List[int] | None = None,
     ) -> None:
         payload = json.dumps(watchlist)
+        extra_payload = json.dumps(extra_message_ids or [])
         async with self._connect() as db:
             await db.execute(
                 """
-                INSERT INTO raidermarket_panels (guild_id, channel_id, message_id, watchlist)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO raidermarket_panels (
+                    guild_id,
+                    channel_id,
+                    message_id,
+                    watchlist,
+                    extra_message_ids
+                )
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(guild_id) DO UPDATE SET
                     channel_id = excluded.channel_id,
                     message_id = excluded.message_id,
-                    watchlist = excluded.watchlist
+                    watchlist = excluded.watchlist,
+                    extra_message_ids = excluded.extra_message_ids
                 """,
-                (guild_id, channel_id, message_id, payload),
+                (guild_id, channel_id, message_id, payload, extra_payload),
             )
             await db.commit()
 
@@ -254,11 +268,11 @@ class Database:
 
     async def get_raidermarket_panel(
         self, guild_id: int
-    ) -> Optional[Tuple[int, int, int, List[str]]]:
+    ) -> Optional[Tuple[int, int, int, List[str], List[int]]]:
         async with self._connect() as db:
             cursor = await db.execute(
                 """
-                SELECT guild_id, channel_id, message_id, watchlist
+                SELECT guild_id, channel_id, message_id, watchlist, extra_message_ids
                 FROM raidermarket_panels
                 WHERE guild_id = ?
                 """,
@@ -268,24 +282,45 @@ class Database:
         if not row:
             return None
         watchlist = json.loads(row[3]) if row[3] else []
-        return row[0], row[1], row[2], watchlist
+        extra_ids = json.loads(row[4]) if row[4] else []
+        return row[0], row[1], row[2], watchlist, extra_ids
 
     async def list_raidermarket_panels(
         self,
-    ) -> List[Tuple[int, int, int, List[str]]]:
+    ) -> List[Tuple[int, int, int, List[str], List[int]]]:
         async with self._connect() as db:
             cursor = await db.execute(
                 """
-                SELECT guild_id, channel_id, message_id, watchlist
+                SELECT guild_id, channel_id, message_id, watchlist, extra_message_ids
                 FROM raidermarket_panels
                 """
             )
             rows = await cursor.fetchall()
-        results: List[Tuple[int, int, int, List[str]]] = []
-        for guild_id, channel_id, message_id, watchlist in rows:
+        results: List[Tuple[int, int, int, List[str], List[int]]] = []
+        for guild_id, channel_id, message_id, watchlist, extra_message_ids in rows:
             parsed = json.loads(watchlist) if watchlist else []
-            results.append((guild_id, channel_id, message_id, parsed))
+            extra_ids = json.loads(extra_message_ids) if extra_message_ids else []
+            results.append((guild_id, channel_id, message_id, parsed, extra_ids))
         return results
+
+    async def update_raidermarket_panel_messages(
+        self,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+        extra_message_ids: List[int],
+    ) -> None:
+        payload = json.dumps(extra_message_ids)
+        async with self._connect() as db:
+            await db.execute(
+                """
+                UPDATE raidermarket_panels
+                SET channel_id = ?, message_id = ?, extra_message_ids = ?
+                WHERE guild_id = ?
+                """,
+                (channel_id, message_id, payload, guild_id),
+            )
+            await db.commit()
 
     async def clear_raidermarket_panel(self, guild_id: int) -> None:
         async with self._connect() as db:

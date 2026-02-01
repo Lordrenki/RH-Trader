@@ -92,10 +92,12 @@ def format_trade_value_lines(
     lines = []
     for item in items:
         trade_value = item.trade_value
+        if not isinstance(trade_value, int):
+            continue
         game_value = item.game_value
-        trade_label = f"{trade_value:,}" if isinstance(trade_value, int) else "N/A"
+        trade_label = f"{trade_value:,}"
         game_label = f"{game_value:,}" if isinstance(game_value, int) else "N/A"
-        line = f"• **[{item.name}]({item.url})** — Trade: **{trade_label}**"
+        line = f"💰 **[{item.name}]({item.url})** — Trade: **{trade_label}**"
         if include_game_value:
             line = f"{line}, Game: {game_label}"
         lines.append(line)

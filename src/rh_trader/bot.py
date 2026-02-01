@@ -224,20 +224,28 @@ def _parse_raider_market_watchlist(raw: str | None) -> list[str]:
     return results
 
 
-def _limit_lines(lines: list[str], *, max_chars: int = 3900) -> list[str]:
+def _chunk_lines(lines: list[str], *, max_chars: int = 3900) -> list[list[str]]:
     if not lines:
-        return lines
-    trimmed: list[str] = []
+        return [[]]
+    chunks: list[list[str]] = []
+    current: list[str] = []
     total = 0
     for line in lines:
-        additional = len(line) + (1 if trimmed else 0)
-        if total + additional > max_chars:
-            remaining = len(lines) - len(trimmed)
-            trimmed.append(f"…and {remaining} more items.")
-            break
-        trimmed.append(line)
-        total += additional
-    return trimmed
+        additional = len(line) + (1 if current else 0)
+        if current and total + additional > max_chars:
+            chunks.append(current)
+            current = [line]
+            total = len(line)
+        else:
+            current.append(line)
+            total += additional
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _has_admin_role(member: discord.Member) -> bool:
+    return any(role.id == ADMIN_ROLE_ID for role in member.roles)
 
 
 class TraderBot(commands.Bot):
@@ -703,17 +711,17 @@ class TraderBot(commands.Bot):
             )
 
         @self.tree.command(
-            name="setup_trade_values",
-            description="Post a RaiderMarket trade value panel that auto-updates",
+            name="trade_values_watchlist",
+            description="Set the RaiderMarket watchlist panel for this server",
         )
         @app_commands.describe(
-            channel="Channel to post the panel in (defaults to the current channel)",
+            channel="Channel to post RaiderMarket trade values",
             watchlist="Comma-separated RaiderMarket item slugs or item URLs",
         )
-        async def setup_trade_values(
+        async def trade_values_watchlist(
             interaction: discord.Interaction,
             channel: Optional[discord.TextChannel] = None,
-            watchlist: Optional[str] = None,
+            watchlist: str,
         ):
             if interaction.guild is None:
                 await interaction.response.send_message(
@@ -724,12 +732,15 @@ class TraderBot(commands.Bot):
                 )
                 return
 
-            perms = getattr(interaction.user, "guild_permissions", None)
-            if not (perms and (perms.manage_guild or perms.administrator)):
+            member = interaction.user if isinstance(interaction.user, discord.Member) else None
+            if member is None or not _has_admin_role(member):
                 await interaction.response.send_message(
                     embed=info_embed(
                         "🚫 Missing permissions",
-                        "You need Manage Server or Administrator permissions to set up the panel.",
+                        (
+                            "You need the admin role to update the watchlist.\n"
+                            f"Role required: <@&{ADMIN_ROLE_ID}>."
+                        ),
                     ),
                     ephemeral=True,
                 )
@@ -746,82 +757,42 @@ class TraderBot(commands.Bot):
                 )
                 return
 
-            slugs = _parse_raider_market_watchlist(watchlist)
-            placeholder = await target_channel.send(
-                "Setting up RaiderMarket trade values…"
-            )
-            await db.upsert_raidermarket_panel(
-                interaction.guild.id,
-                target_channel.id,
-                placeholder.id,
-                slugs,
-            )
-            watchlist_label = (
-                f"Watchlist set with {len(slugs)} item(s)."
-                if slugs
-                else f"Showing top {RAIDERMARKET_TOP_COUNT} trade values."
-            )
-            await interaction.response.send_message(
-                embed=info_embed(
-                    "✅ RaiderMarket panel saved",
-                    (
-                        f"I'll update {target_channel.mention} every 15 minutes.\n"
-                        f"{watchlist_label}"
-                    ),
-                ),
-                ephemeral=True,
-            )
-            await self._refresh_raidermarket_panels(
-                target_guild_id=interaction.guild.id
-            )
-
-        @self.tree.command(
-            name="trade_values_watchlist",
-            description="Update the RaiderMarket watchlist for this server",
-        )
-        @app_commands.describe(
-            watchlist="Comma-separated RaiderMarket item slugs or item URLs",
-        )
-        async def trade_values_watchlist(
-            interaction: discord.Interaction,
-            watchlist: str,
-        ):
-            if interaction.guild is None:
-                await interaction.response.send_message(
-                    embed=info_embed(
-                        "🌐 Guild only", "This command can only be used inside a server."
-                    ),
-                    ephemeral=True,
-                )
-                return
-
-            perms = getattr(interaction.user, "guild_permissions", None)
-            if not (perms and (perms.manage_guild or perms.administrator)):
-                await interaction.response.send_message(
-                    embed=info_embed(
-                        "🚫 Missing permissions",
-                        "You need Manage Server or Administrator permissions to update the watchlist.",
-                    ),
-                    ephemeral=True,
-                )
-                return
-
             panel = await db.get_raidermarket_panel(interaction.guild.id)
-            if panel is None:
-                await interaction.response.send_message(
-                    embed=info_embed(
-                        "🚫 Panel not set",
-                        "Run /setup_trade_values first to create the panel.",
-                    ),
-                    ephemeral=True,
-                )
-                return
-
             slugs = _parse_raider_market_watchlist(watchlist)
-            await db.update_raidermarket_watchlist(interaction.guild.id, slugs)
+            if panel is None or panel[1] != target_channel.id:
+                if panel is not None and panel[1] != target_channel.id:
+                    old_channel = self.get_channel(panel[1])
+                    if old_channel is None:
+                        with contextlib.suppress(discord.HTTPException):
+                            old_channel = await self.fetch_channel(panel[1])
+                    if isinstance(old_channel, (discord.TextChannel, discord.Thread)):
+                        old_message_id = panel[2]
+                        old_extra_ids = panel[4]
+                        with contextlib.suppress(discord.HTTPException, discord.NotFound):
+                            old_message = await old_channel.fetch_message(old_message_id)
+                            await old_message.delete()
+                        for extra_id in old_extra_ids:
+                            with contextlib.suppress(
+                                discord.HTTPException, discord.NotFound
+                            ):
+                                extra_message = await old_channel.fetch_message(extra_id)
+                                await extra_message.delete()
+                placeholder = await target_channel.send(
+                    "Setting up RaiderMarket trade values…"
+                )
+                await db.upsert_raidermarket_panel(
+                    interaction.guild.id,
+                    target_channel.id,
+                    placeholder.id,
+                    slugs,
+                )
+                response_title = "✅ RaiderMarket panel saved"
+            else:
+                await db.update_raidermarket_watchlist(interaction.guild.id, slugs)
+                response_title = "✅ Watchlist updated"
             await interaction.response.send_message(
                 embed=info_embed(
-                    "✅ Watchlist updated",
+                    response_title,
                     f"Tracking {len(slugs)} item(s) now.",
                 ),
                 ephemeral=True,
@@ -967,12 +938,13 @@ class TraderBot(commands.Bot):
             return
 
         updated_at = datetime.now(timezone.utc)
-        for guild_id, channel_id, message_id, watchlist in panels:
+        for guild_id, channel_id, message_id, watchlist, extra_message_ids in panels:
             await self._update_raidermarket_panel(
                 guild_id,
                 channel_id,
                 message_id,
                 watchlist,
+                extra_message_ids,
                 items,
                 updated_at,
             )
@@ -983,6 +955,7 @@ class TraderBot(commands.Bot):
         channel_id: int,
         message_id: int,
         watchlist: list[str],
+        extra_message_ids: list[int],
         items: dict[str, Any],
         updated_at: datetime,
     ) -> None:
@@ -1002,6 +975,10 @@ class TraderBot(commands.Bot):
         try:
             message = await channel.fetch_message(message_id)
         except discord.NotFound:
+            for extra_id in extra_message_ids:
+                with contextlib.suppress(discord.HTTPException):
+                    extra_message = await channel.fetch_message(extra_id)
+                    await extra_message.delete()
             await self.db.clear_raidermarket_panel(guild_id)
             _log.info(
                 "Raidermarket panel message missing for guild %s, clearing settings",
@@ -1016,44 +993,75 @@ class TraderBot(commands.Bot):
             )
             return
 
-        embed = self._build_raidermarket_embed(items, watchlist, updated_at)
+        embeds = self._build_raidermarket_embeds(items, watchlist, updated_at)
+        embed_batches = [
+            embeds[index : index + 10] for index in range(0, len(embeds), 10)
+        ]
         try:
-            await message.edit(embed=embed, content=None)
+            await message.edit(embeds=embed_batches[0], content=None)
         except discord.HTTPException:
             _log.warning(
                 "Failed to edit raidermarket panel message %s in guild %s",
                 message_id,
                 guild_id,
             )
+            return
 
-    def _build_raidermarket_embed(
+        new_extra_ids: list[int] = []
+        for idx, batch in enumerate(embed_batches[1:]):
+            existing_id = extra_message_ids[idx] if idx < len(extra_message_ids) else None
+            if existing_id is not None:
+                try:
+                    extra_message = await channel.fetch_message(existing_id)
+                    await extra_message.edit(embeds=batch, content=None)
+                    new_extra_ids.append(existing_id)
+                    continue
+                except discord.HTTPException:
+                    pass
+
+            try:
+                extra_message = await channel.send(embeds=batch)
+                new_extra_ids.append(extra_message.id)
+            except discord.HTTPException:
+                _log.warning(
+                    "Failed to send extra raidermarket panel message in guild %s",
+                    guild_id,
+                )
+
+        stale_count_start = len(embed_batches) - 1
+        for stale_id in extra_message_ids[stale_count_start:]:
+            with contextlib.suppress(discord.HTTPException):
+                stale_message = await channel.fetch_message(stale_id)
+                await stale_message.delete()
+
+        if new_extra_ids != extra_message_ids:
+            await self.db.update_raidermarket_panel_messages(
+                guild_id,
+                channel.id,
+                message.id,
+                new_extra_ids,
+            )
+
+    def _build_raidermarket_embeds(
         self,
         items: dict[str, Any],
         watchlist: list[str],
         updated_at: datetime,
-    ) -> discord.Embed:
+    ) -> list[discord.Embed]:
         description_lines: list[str] = []
-        missing_slugs: list[str] = []
 
         if watchlist:
             chosen = []
             for slug in watchlist:
                 item = items.get(slug)
-                if item is None:
-                    missing_slugs.append(slug)
-                    continue
-                chosen.append(item)
+                if item is not None and isinstance(item.trade_value, int):
+                    chosen.append(item)
             description_lines.extend(format_trade_value_lines(chosen))
-            if missing_slugs:
-                description_lines.append("")
-                description_lines.append(
-                    f"Missing slugs: `{', '.join(missing_slugs)}`"
-                )
             title = "RaiderMarket Trade Values (Watchlist)"
         else:
             ranked = sorted(
-                items.values(),
-                key=lambda entry: entry.trade_value or 0,
+                (entry for entry in items.values() if isinstance(entry.trade_value, int)),
+                key=lambda entry: entry.trade_value,
                 reverse=True,
             )
             top_items = ranked[:RAIDERMARKET_TOP_COUNT]
@@ -1061,17 +1069,22 @@ class TraderBot(commands.Bot):
             title = f"RaiderMarket Top {len(top_items)} Trade Values"
 
         if not description_lines:
-            description_lines = ["No items found on RaiderMarket browse page."]
+            description_lines = ["No items with trade values found on RaiderMarket."]
 
-        description = "\n".join(_limit_lines(description_lines))
-        embed = discord.Embed(
-            title=title,
-            description=description,
-            color=DEFAULT_EMBED_COLOR,
-        )
         timestamp = updated_at.strftime("%Y-%m-%d %H:%M UTC")
-        embed.set_footer(text=f"Last updated: {timestamp} • Source: {BROWSE_URL}")
-        return embed
+        chunks = _chunk_lines(description_lines)
+        total_chunks = len(chunks)
+        embeds: list[discord.Embed] = []
+        for idx, chunk in enumerate(chunks, start=1):
+            page_title = title if total_chunks == 1 else f"{title} (Page {idx}/{total_chunks})"
+            embed = discord.Embed(
+                title=page_title,
+                description="\n".join(chunk),
+                color=DEFAULT_EMBED_COLOR,
+            )
+            embed.set_footer(text=f"Last updated: {timestamp} • Source: {BROWSE_URL}")
+            embeds.append(embed)
+        return embeds
 
     def _alert_limit(self, interaction: discord.Interaction) -> int:
         return 20
