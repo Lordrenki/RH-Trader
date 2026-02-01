@@ -802,8 +802,8 @@ class TraderBot(commands.Bot):
         )
         async def trade_values_watchlist(
             interaction: discord.Interaction,
-            channel: Optional[discord.TextChannel] = None,
             watchlist: str,
+            channel: Optional[discord.TextChannel] = None,
         ):
             if interaction.guild is None:
                 await interaction.response.send_message(
