@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import time
 from typing import Iterable, List, Optional, Tuple
@@ -19,6 +20,9 @@ class Database:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self._lock = asyncio.Lock()
         self.max_rep_level = 200
+        self.rep_xp_per_positive = 10
+        self.rep_xp_penalty = 2
+        self.rep_xp_base = 10
 
     async def setup(self) -> None:
         async with self._connect() as db:
@@ -1050,14 +1054,27 @@ class Database:
                         )
                 await db.commit()
 
+    def _rep_xp(self, positive: int, negative: int) -> int:
+        xp = positive * self.rep_xp_per_positive - negative * self.rep_xp_penalty
+        return max(0, xp)
+
+    def _rep_xp_required(self, level: int) -> int:
+        clamped = max(0, min(self.max_rep_level, level))
+        return self.rep_xp_base * clamped * (clamped + 1) // 2
+
     def _rep_level(self, positive: int, negative: int) -> int:
-        level = positive - negative
+        xp = self._rep_xp(positive, negative)
+        if xp <= 0:
+            return 0
+        scaled = xp * 2 // self.rep_xp_base
+        level = (math.isqrt(1 + 4 * scaled) - 1) // 2
         return max(0, min(self.max_rep_level, level))
 
     async def set_rep_level(self, user_id: int, level: int) -> None:
         await self.ensure_user(user_id)
         clamped = max(0, min(self.max_rep_level, level))
-        positive = clamped
+        required_xp = self._rep_xp_required(clamped)
+        positive = math.ceil(required_xp / self.rep_xp_per_positive) if required_xp else 0
         negative = 0
         async with self._lock:
             async with self._connect() as db:
@@ -1072,10 +1089,10 @@ class Database:
             cursor = await db.execute(
                 "SELECT user_id, rep_positive, rep_negative, is_premium\n"
                 "FROM users\n"
-                "ORDER BY (rep_positive - rep_negative) DESC,\n"
+                "ORDER BY (rep_positive * ? - rep_negative * ?) DESC,\n"
                 "     rep_positive DESC, rep_negative ASC\n"
                 "LIMIT ?",
-                (limit,),
+                (self.rep_xp_per_positive, self.rep_xp_penalty, limit),
             )
             rows = await cursor.fetchall()
             results: list[tuple[int, int, int, int, bool]] = []
