@@ -10,6 +10,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Optional, Tuple
 
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -24,6 +25,7 @@ from .embeds import (
     info_embed,
     rep_level_summary,
 )
+from .raider_market import BROWSE_URL, fetch_browse_items, format_trade_value_lines
 
 _log = logging.getLogger(__name__)
 QUICK_RATING_COOLDOWN_SECONDS = 24 * 60 * 60
@@ -37,6 +39,8 @@ TRADE_INACTIVITY_CLOSE_SECONDS = 24 * 60 * 60
 REP_LEVEL_ROLE_ID = 1_433_701_792_721_666_128
 ADMIN_ROLE_ID = 927_355_923_364_720_651
 REP_LEVEL_ROLE_THRESHOLD = 5
+RAIDERMARKET_REFRESH_SECONDS = 15 * 60
+RAIDERMARKET_TOP_COUNT = 25
 PREMIUM_BADGE_URL = (
     "https://cdn.discordapp.com/attachments/1431560702518104175/1447739322022498364/"
     "discotools-xyz-icon.png?ex=6938b7d0&is=69376650&hm=bd0daea439bc5d7622d4b7008ba08ba8f5e44f30a79394a23dd58f5f5a07a3e6"
@@ -196,6 +200,46 @@ async def _lookup_display_name(client: discord.Client, user_id: int) -> str:
     return display_name
 
 
+def _normalize_raider_market_slug(value: str) -> str:
+    cleaned = value.strip()
+    if cleaned.startswith("http"):
+        cleaned = cleaned.split("/item/", 1)[-1]
+    if cleaned.startswith("/item/"):
+        cleaned = cleaned.split("/item/", 1)[-1]
+    return cleaned.strip().strip("/").lower()
+
+
+def _parse_raider_market_watchlist(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    entries = re.split(r"[,\n]+", raw)
+    seen: set[str] = set()
+    results: list[str] = []
+    for entry in entries:
+        slug = _normalize_raider_market_slug(entry)
+        if not slug or slug in seen:
+            continue
+        seen.add(slug)
+        results.append(slug)
+    return results
+
+
+def _limit_lines(lines: list[str], *, max_chars: int = 3900) -> list[str]:
+    if not lines:
+        return lines
+    trimmed: list[str] = []
+    total = 0
+    for line in lines:
+        additional = len(line) + (1 if trimmed else 0)
+        if total + additional > max_chars:
+            remaining = len(lines) - len(trimmed)
+            trimmed.append(f"…and {remaining} more items.")
+            break
+        trimmed.append(line)
+        total += additional
+    return trimmed
+
+
 class TraderBot(commands.Bot):
     """Discord bot that exposes trading slash commands."""
 
@@ -219,6 +263,8 @@ class TraderBot(commands.Bot):
         self.wishlist_actions = WishlistGroup(self.db)
         self.alert_actions = AlertGroup(self.db, self._alert_limit)
         self._inactivity_task: asyncio.Task | None = None
+        self._raidermarket_task: asyncio.Task | None = None
+        self._raidermarket_session: aiohttp.ClientSession | None = None
 
     async def setup_hook(self) -> None:
         await self.db.setup()
@@ -229,6 +275,7 @@ class TraderBot(commands.Bot):
         await self.tree.sync()
         _log.info("Slash commands synced")
         self._inactivity_task = self.loop.create_task(self._inactivity_watcher())
+        self._raidermarket_task = self.loop.create_task(self._raidermarket_watcher())
 
     async def close(self) -> None:
         await self.catalog.close()
@@ -236,6 +283,12 @@ class TraderBot(commands.Bot):
             self._inactivity_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._inactivity_task
+        if self._raidermarket_task:
+            self._raidermarket_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._raidermarket_task
+        if self._raidermarket_session and not self._raidermarket_session.closed:
+            await self._raidermarket_session.close()
         await super().close()
 
     async def on_message(self, message: discord.Message) -> None:
@@ -649,6 +702,134 @@ class TraderBot(commands.Bot):
                 ephemeral=True,
             )
 
+        @self.tree.command(
+            name="setup_trade_values",
+            description="Post a RaiderMarket trade value panel that auto-updates",
+        )
+        @app_commands.describe(
+            channel="Channel to post the panel in (defaults to the current channel)",
+            watchlist="Comma-separated RaiderMarket item slugs or item URLs",
+        )
+        async def setup_trade_values(
+            interaction: discord.Interaction,
+            channel: Optional[discord.TextChannel] = None,
+            watchlist: Optional[str] = None,
+        ):
+            if interaction.guild is None:
+                await interaction.response.send_message(
+                    embed=info_embed(
+                        "🌐 Guild only", "This command can only be used inside a server."
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            perms = getattr(interaction.user, "guild_permissions", None)
+            if not (perms and (perms.manage_guild or perms.administrator)):
+                await interaction.response.send_message(
+                    embed=info_embed(
+                        "🚫 Missing permissions",
+                        "You need Manage Server or Administrator permissions to set up the panel.",
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            target_channel = channel or interaction.channel
+            if not isinstance(target_channel, discord.TextChannel):
+                await interaction.response.send_message(
+                    embed=info_embed(
+                        "🚫 Invalid channel",
+                        "Please choose a text channel for the RaiderMarket panel.",
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            slugs = _parse_raider_market_watchlist(watchlist)
+            placeholder = await target_channel.send(
+                "Setting up RaiderMarket trade values…"
+            )
+            await db.upsert_raidermarket_panel(
+                interaction.guild.id,
+                target_channel.id,
+                placeholder.id,
+                slugs,
+            )
+            watchlist_label = (
+                f"Watchlist set with {len(slugs)} item(s)."
+                if slugs
+                else f"Showing top {RAIDERMARKET_TOP_COUNT} trade values."
+            )
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "✅ RaiderMarket panel saved",
+                    (
+                        f"I'll update {target_channel.mention} every 15 minutes.\n"
+                        f"{watchlist_label}"
+                    ),
+                ),
+                ephemeral=True,
+            )
+            await self._refresh_raidermarket_panels(
+                target_guild_id=interaction.guild.id
+            )
+
+        @self.tree.command(
+            name="trade_values_watchlist",
+            description="Update the RaiderMarket watchlist for this server",
+        )
+        @app_commands.describe(
+            watchlist="Comma-separated RaiderMarket item slugs or item URLs",
+        )
+        async def trade_values_watchlist(
+            interaction: discord.Interaction,
+            watchlist: str,
+        ):
+            if interaction.guild is None:
+                await interaction.response.send_message(
+                    embed=info_embed(
+                        "🌐 Guild only", "This command can only be used inside a server."
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            perms = getattr(interaction.user, "guild_permissions", None)
+            if not (perms and (perms.manage_guild or perms.administrator)):
+                await interaction.response.send_message(
+                    embed=info_embed(
+                        "🚫 Missing permissions",
+                        "You need Manage Server or Administrator permissions to update the watchlist.",
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            panel = await db.get_raidermarket_panel(interaction.guild.id)
+            if panel is None:
+                await interaction.response.send_message(
+                    embed=info_embed(
+                        "🚫 Panel not set",
+                        "Run /setup_trade_values first to create the panel.",
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            slugs = _parse_raider_market_watchlist(watchlist)
+            await db.update_raidermarket_watchlist(interaction.guild.id, slugs)
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "✅ Watchlist updated",
+                    f"Tracking {len(slugs)} item(s) now.",
+                ),
+                ephemeral=True,
+            )
+            await self._refresh_raidermarket_panels(
+                target_guild_id=interaction.guild.id
+            )
+
     async def _inactivity_watcher(self) -> None:
         await self.wait_until_ready()
         try:
@@ -747,6 +928,150 @@ class TraderBot(commands.Bot):
                     )
 
                 await self.db.mark_inactivity_warning_sent(trade_id)
+
+    def _get_raidermarket_session(self) -> aiohttp.ClientSession:
+        if self._raidermarket_session is None or self._raidermarket_session.closed:
+            self._raidermarket_session = aiohttp.ClientSession(
+                headers={
+                    "User-Agent": "RH-Trader RaiderMarket Tracker (https://raidermarket.com/browse)"
+                }
+            )
+        return self._raidermarket_session
+
+    async def _raidermarket_watcher(self) -> None:
+        await self.wait_until_ready()
+        try:
+            while not self.is_closed():
+                try:
+                    await self._refresh_raidermarket_panels()
+                except Exception:
+                    _log.exception("Error while updating RaiderMarket trade values")
+                await asyncio.sleep(RAIDERMARKET_REFRESH_SECONDS)
+        except asyncio.CancelledError:
+            return
+
+    async def _refresh_raidermarket_panels(
+        self, *, target_guild_id: int | None = None
+    ) -> None:
+        panels = await self.db.list_raidermarket_panels()
+        if target_guild_id is not None:
+            panels = [panel for panel in panels if panel[0] == target_guild_id]
+        if not panels:
+            return
+
+        session = self._get_raidermarket_session()
+        try:
+            items = await fetch_browse_items(session)
+        except Exception:
+            _log.exception("Failed to fetch RaiderMarket browse data")
+            return
+
+        updated_at = datetime.now(timezone.utc)
+        for guild_id, channel_id, message_id, watchlist in panels:
+            await self._update_raidermarket_panel(
+                guild_id,
+                channel_id,
+                message_id,
+                watchlist,
+                items,
+                updated_at,
+            )
+
+    async def _update_raidermarket_panel(
+        self,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+        watchlist: list[str],
+        items: dict[str, Any],
+        updated_at: datetime,
+    ) -> None:
+        channel = self.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.fetch_channel(channel_id)
+            except discord.HTTPException:
+                channel = None
+
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            _log.warning(
+                "Raidermarket panel channel %s not found for guild %s", channel_id, guild_id
+            )
+            return
+
+        try:
+            message = await channel.fetch_message(message_id)
+        except discord.NotFound:
+            await self.db.clear_raidermarket_panel(guild_id)
+            _log.info(
+                "Raidermarket panel message missing for guild %s, clearing settings",
+                guild_id,
+            )
+            return
+        except discord.HTTPException:
+            _log.warning(
+                "Unable to fetch raidermarket panel message %s in guild %s",
+                message_id,
+                guild_id,
+            )
+            return
+
+        embed = self._build_raidermarket_embed(items, watchlist, updated_at)
+        try:
+            await message.edit(embed=embed, content=None)
+        except discord.HTTPException:
+            _log.warning(
+                "Failed to edit raidermarket panel message %s in guild %s",
+                message_id,
+                guild_id,
+            )
+
+    def _build_raidermarket_embed(
+        self,
+        items: dict[str, Any],
+        watchlist: list[str],
+        updated_at: datetime,
+    ) -> discord.Embed:
+        description_lines: list[str] = []
+        missing_slugs: list[str] = []
+
+        if watchlist:
+            chosen = []
+            for slug in watchlist:
+                item = items.get(slug)
+                if item is None:
+                    missing_slugs.append(slug)
+                    continue
+                chosen.append(item)
+            description_lines.extend(format_trade_value_lines(chosen))
+            if missing_slugs:
+                description_lines.append("")
+                description_lines.append(
+                    f"Missing slugs: `{', '.join(missing_slugs)}`"
+                )
+            title = "RaiderMarket Trade Values (Watchlist)"
+        else:
+            ranked = sorted(
+                items.values(),
+                key=lambda entry: entry.trade_value or 0,
+                reverse=True,
+            )
+            top_items = ranked[:RAIDERMARKET_TOP_COUNT]
+            description_lines.extend(format_trade_value_lines(top_items))
+            title = f"RaiderMarket Top {len(top_items)} Trade Values"
+
+        if not description_lines:
+            description_lines = ["No items found on RaiderMarket browse page."]
+
+        description = "\n".join(_limit_lines(description_lines))
+        embed = discord.Embed(
+            title=title,
+            description=description,
+            color=DEFAULT_EMBED_COLOR,
+        )
+        timestamp = updated_at.strftime("%Y-%m-%d %H:%M UTC")
+        embed.set_footer(text=f"Last updated: {timestamp} • Source: {BROWSE_URL}")
+        return embed
 
     def _alert_limit(self, interaction: discord.Interaction) -> int:
         return 20

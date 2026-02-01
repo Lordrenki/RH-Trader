@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from typing import Iterable, List, Optional, Tuple
@@ -127,12 +128,20 @@ class Database:
                     item TEXT NOT NULL,
                     PRIMARY KEY (user_id, item)
                 );
+
+                CREATE TABLE IF NOT EXISTS raidermarket_panels (
+                    guild_id INTEGER PRIMARY KEY,
+                    channel_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    watchlist TEXT DEFAULT ''
+                );
                 """
             )
             await db.commit()
             await self._ensure_trade_columns(db)
             await self._ensure_user_columns(db)
             await self._ensure_guild_settings_columns(db)
+            await self._ensure_raidermarket_columns(db)
 
     def _connect(self) -> aiosqlite.Connection:
         return aiosqlite.connect(self.path)
@@ -198,7 +207,92 @@ class Database:
             await db.execute(
                 "ALTER TABLE guild_settings ADD COLUMN trade_thread_channel_id INTEGER"
             )
+
+    async def _ensure_raidermarket_columns(self, db: aiosqlite.Connection) -> None:
+        cursor = await db.execute("PRAGMA table_info(raidermarket_panels)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        if not columns:
+            return
+        if "watchlist" not in columns:
+            await db.execute(
+                "ALTER TABLE raidermarket_panels ADD COLUMN watchlist TEXT DEFAULT ''"
+            )
         await db.commit()
+
+    async def upsert_raidermarket_panel(
+        self,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+        watchlist: List[str],
+    ) -> None:
+        payload = json.dumps(watchlist)
+        async with self._connect() as db:
+            await db.execute(
+                """
+                INSERT INTO raidermarket_panels (guild_id, channel_id, message_id, watchlist)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    channel_id = excluded.channel_id,
+                    message_id = excluded.message_id,
+                    watchlist = excluded.watchlist
+                """,
+                (guild_id, channel_id, message_id, payload),
+            )
+            await db.commit()
+
+    async def update_raidermarket_watchlist(
+        self, guild_id: int, watchlist: List[str]
+    ) -> None:
+        payload = json.dumps(watchlist)
+        async with self._connect() as db:
+            await db.execute(
+                "UPDATE raidermarket_panels SET watchlist = ? WHERE guild_id = ?",
+                (payload, guild_id),
+            )
+            await db.commit()
+
+    async def get_raidermarket_panel(
+        self, guild_id: int
+    ) -> Optional[Tuple[int, int, int, List[str]]]:
+        async with self._connect() as db:
+            cursor = await db.execute(
+                """
+                SELECT guild_id, channel_id, message_id, watchlist
+                FROM raidermarket_panels
+                WHERE guild_id = ?
+                """,
+                (guild_id,),
+            )
+            row = await cursor.fetchone()
+        if not row:
+            return None
+        watchlist = json.loads(row[3]) if row[3] else []
+        return row[0], row[1], row[2], watchlist
+
+    async def list_raidermarket_panels(
+        self,
+    ) -> List[Tuple[int, int, int, List[str]]]:
+        async with self._connect() as db:
+            cursor = await db.execute(
+                """
+                SELECT guild_id, channel_id, message_id, watchlist
+                FROM raidermarket_panels
+                """
+            )
+            rows = await cursor.fetchall()
+        results: List[Tuple[int, int, int, List[str]]] = []
+        for guild_id, channel_id, message_id, watchlist in rows:
+            parsed = json.loads(watchlist) if watchlist else []
+            results.append((guild_id, channel_id, message_id, parsed))
+        return results
+
+    async def clear_raidermarket_panel(self, guild_id: int) -> None:
+        async with self._connect() as db:
+            await db.execute(
+                "DELETE FROM raidermarket_panels WHERE guild_id = ?", (guild_id,)
+            )
+            await db.commit()
 
     async def ensure_user(self, user_id: int) -> None:
         async with self._lock:
