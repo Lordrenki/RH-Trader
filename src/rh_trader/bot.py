@@ -68,6 +68,20 @@ def _can_view_other(interaction: discord.Interaction, target: discord.User | dis
     return True
 
 
+def _trim_preview(text: str, limit: int = 200) -> str:
+    trimmed = text.strip()
+    if len(trimmed) <= limit:
+        return trimmed
+    return f"{trimmed[: max(0, limit - 3)].rstrip()}..."
+
+
+def _extract_rep_reason(content: str, target_id: int) -> str:
+    cleaned = re.sub(r"(?:^|\s)[+-]\s*rep\b", " ", content, flags=re.IGNORECASE)
+    cleaned = re.sub(rf"<@!?{target_id}>", " ", cleaned)
+    cleaned = " ".join(cleaned.split())
+    return cleaned.strip()
+
+
 def _paginate_field_entries(entries: list, formatter, per_page: int) -> list[str]:
     """Split entries into field-friendly pages respecting Discord limits."""
 
@@ -334,6 +348,73 @@ class TraderBot(commands.Bot):
             )
             return
 
+        if sign == "-":
+            reason = _extract_rep_reason(normalized_content, target_id)
+            if not reason:
+                await message.channel.send(
+                    embed=info_embed(
+                        "🚫 Missing reason",
+                        "Include a reason when sending -rep, e.g. `-rep @user reason`.",
+                    )
+                )
+                return
+
+            preview = _trim_preview(reason, limit=200)
+            prompt = info_embed(
+                "Confirm -rep",
+                (
+                    "Are you sure you want to -rep this user? Falsely repping someone could "
+                    "result in removal from trading.\n"
+                    f"**Target:** <@{target_id}>\n"
+                    f"**Reason:** {preview}"
+                ),
+            )
+
+            async def confirm(interaction: discord.Interaction) -> None:
+                recorded, retry_after = await self._record_message_rep(
+                    message, target_id, sign
+                )
+                if recorded:
+                    await interaction.response.send_message(
+                        embed=info_embed("✅ -rep confirmed", "Your -rep was submitted."),
+                        ephemeral=True,
+                    )
+                    return
+                wait_label = _format_duration(int(retry_after or 0))
+                await interaction.response.send_message(
+                    embed=info_embed(
+                        "⏳ On cooldown",
+                        f"You recently rated <@{target_id}>. You can send another rep in {wait_label}.",
+                    ),
+                    ephemeral=True,
+                )
+
+            async def cancel(interaction: discord.Interaction) -> None:
+                await interaction.response.send_message(
+                    embed=info_embed("Cancelled", "Your -rep was not submitted."),
+                    ephemeral=True,
+                )
+
+            view = ConfirmNegativeRepView(
+                message.author.id, on_confirm=confirm, on_cancel=cancel
+            )
+            try:
+                await message.author.send(embed=prompt, view=view)
+                await message.channel.send(
+                    embed=info_embed(
+                        "📬 Check your DMs",
+                        "I sent you a confirmation prompt to finalize this -rep.",
+                    )
+                )
+            except discord.HTTPException:
+                await message.channel.send(embed=prompt, view=view)
+            return
+
+        await self._record_message_rep(message, target_id, sign)
+
+    async def _record_message_rep(
+        self, message: discord.Message, target_id: int, sign: str
+    ) -> tuple[bool, int | None]:
         score = 1 if sign == "+" else -1
         recorded, retry_after = await self.db.record_quick_rating(
             message.author.id,
@@ -349,7 +430,7 @@ class TraderBot(commands.Bot):
                     f"You recently rated <@{target_id}>. You can send another rep in {wait_label}.",
                 )
             )
-            return
+            return False, retry_after
 
         (
             _,
@@ -379,6 +460,7 @@ class TraderBot(commands.Bot):
                 ),
             )
         )
+        return True, None
 
     async def add_misc_commands(self) -> None:
         db = self.db
@@ -1655,6 +1737,45 @@ class ConfirmClearView(discord.ui.View):
         await interaction.response.edit_message(
             embed=info_embed("Inventory unchanged", "No items were removed."), view=None
         )
+
+
+class ConfirmNegativeRepView(discord.ui.View):
+    def __init__(
+        self,
+        author_id: int,
+        *,
+        on_confirm: Callable[[discord.Interaction], Awaitable[None]],
+        on_cancel: Callable[[discord.Interaction], Awaitable[None]],
+    ) -> None:
+        super().__init__(timeout=60)
+        self._author_id = author_id
+        self._on_confirm = on_confirm
+        self._on_cancel = on_cancel
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self._author_id:
+            await interaction.response.send_message(
+                embed=info_embed("🚫 Not your rep", "Only the original sender can confirm this."),
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Yes, -rep", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._on_confirm(interaction)
+        self.disable_all_items()
+        with contextlib.suppress(discord.HTTPException):
+            if interaction.message:
+                await interaction.message.edit(view=self)
+
+    @discord.ui.button(label="No, cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._on_cancel(interaction)
+        self.disable_all_items()
+        with contextlib.suppress(discord.HTTPException):
+            if interaction.message:
+                await interaction.message.edit(view=self)
 
 
 class StockAddModal(discord.ui.Modal):
