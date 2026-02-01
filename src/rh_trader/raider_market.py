@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import re
-from typing import Iterable
+from typing import Any, Iterable
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -48,8 +49,72 @@ def _extract_slug(href: str) -> str | None:
     return match.group(1).strip()
 
 
-def parse_browse_items(html: str) -> dict[str, RaiderMarketItem]:
-    soup = BeautifulSoup(html, "html.parser")
+def _coerce_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        return _parse_int(value)
+    return None
+
+
+def _extract_slug_from_record(record: dict[str, Any]) -> str | None:
+    slug = record.get("slug") or record.get("itemSlug") or record.get("id")
+    if isinstance(slug, str) and slug.strip():
+        return slug.strip()
+    url = record.get("url") or record.get("href")
+    if isinstance(url, str):
+        return _extract_slug(url.strip())
+    return None
+
+
+def _iter_item_records(data: Any) -> Iterable[dict[str, Any]]:
+    if isinstance(data, dict):
+        if "slug" in data and "name" in data:
+            yield data
+        for value in data.values():
+            yield from _iter_item_records(value)
+    elif isinstance(data, list):
+        for entry in data:
+            yield from _iter_item_records(entry)
+
+
+def _parse_items_from_json(data: Any) -> dict[str, RaiderMarketItem]:
+    items: dict[str, RaiderMarketItem] = {}
+    for record in _iter_item_records(data):
+        slug = _extract_slug_from_record(record)
+        name = record.get("name")
+        if not slug or not isinstance(name, str) or not name.strip():
+            continue
+        trade_value = _coerce_int(
+            record.get("tradeValue")
+            or record.get("trade_value")
+            or record.get("trade")
+            or record.get("tradevalue")
+        )
+        game_value = _coerce_int(
+            record.get("gameValue")
+            or record.get("game_value")
+            or record.get("game")
+            or record.get("gamevalue")
+        )
+        items.setdefault(
+            slug,
+            RaiderMarketItem(
+                slug=slug,
+                name=name.strip(),
+                trade_value=trade_value,
+                game_value=game_value,
+                url=f"https://raidermarket.com/item/{slug}",
+            ),
+        )
+    return items
+
+
+def _parse_items_from_html_links(soup: BeautifulSoup) -> dict[str, RaiderMarketItem]:
     items: dict[str, RaiderMarketItem] = {}
     for link in soup.find_all("a", href=True):
         href = link.get("href", "").strip()
@@ -72,6 +137,32 @@ def parse_browse_items(html: str) -> dict[str, RaiderMarketItem]:
                 url=f"https://raidermarket.com/item/{slug}",
             ),
         )
+    return items
+
+
+def _parse_items_from_embedded_json(soup: BeautifulSoup) -> dict[str, RaiderMarketItem]:
+    items: dict[str, RaiderMarketItem] = {}
+    for script in soup.find_all("script"):
+        script_id = script.get("id")
+        script_type = script.get("type")
+        if script_id != "__NEXT_DATA__" and script_type != "application/json":
+            continue
+        raw = script.string or script.get_text(strip=True)
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        items.update(_parse_items_from_json(payload))
+    return items
+
+
+def parse_browse_items(html: str) -> dict[str, RaiderMarketItem]:
+    soup = BeautifulSoup(html, "html.parser")
+    items: dict[str, RaiderMarketItem] = {}
+    items.update(_parse_items_from_html_links(soup))
+    items.update(_parse_items_from_embedded_json(soup))
     return items
 
 
