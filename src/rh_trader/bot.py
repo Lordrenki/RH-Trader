@@ -792,19 +792,12 @@ class TraderBot(commands.Bot):
                 ephemeral=True,
             )
 
-        @self.tree.command(
-            name="trade_values_watchlist",
-            description="Set the RaiderMarket watchlist panel for this server",
-        )
-        @app_commands.describe(
-            channel="Channel to post RaiderMarket trade values",
-            watchlist="Optional comma-separated RaiderMarket item slugs or item URLs",
-        )
-        async def trade_values_watchlist(
+        async def _handle_trade_values_panel(
             interaction: discord.Interaction,
-            watchlist: Optional[str] = None,
-            channel: Optional[discord.TextChannel] = None,
-        ):
+            *,
+            watchlist: Optional[str],
+            channel: Optional[discord.TextChannel],
+        ) -> None:
             if interaction.guild is None:
                 await interaction.response.send_message(
                     embed=info_embed(
@@ -883,6 +876,42 @@ class TraderBot(commands.Bot):
             )
             await self._refresh_raidermarket_panels(
                 target_guild_id=interaction.guild.id
+            )
+
+        @self.tree.command(
+            name="trade_values",
+            description="Post RaiderMarket trade values in the current channel",
+        )
+        @app_commands.describe(
+            watchlist="Optional comma-separated RaiderMarket item slugs or item URLs",
+        )
+        async def trade_values(
+            interaction: discord.Interaction,
+            watchlist: Optional[str] = None,
+        ):
+            await _handle_trade_values_panel(
+                interaction,
+                watchlist=watchlist,
+                channel=None,
+            )
+
+        @self.tree.command(
+            name="trade_values_watchlist",
+            description="Set the RaiderMarket watchlist panel for this server",
+        )
+        @app_commands.describe(
+            channel="Channel to post RaiderMarket trade values",
+            watchlist="Optional comma-separated RaiderMarket item slugs or item URLs",
+        )
+        async def trade_values_watchlist(
+            interaction: discord.Interaction,
+            watchlist: Optional[str] = None,
+            channel: Optional[discord.TextChannel] = None,
+        ):
+            await _handle_trade_values_panel(
+                interaction,
+                watchlist=watchlist,
+                channel=channel,
             )
 
     async def _inactivity_watcher(self) -> None:
@@ -1140,7 +1169,9 @@ class TraderBot(commands.Bot):
                 item = items.get(slug)
                 if item is not None and isinstance(item.trade_value, int) and item.trade_value > 0:
                     chosen.append(item)
-            description_lines.extend(format_trade_value_lines(chosen))
+            description_lines.extend(
+                format_trade_value_lines(chosen, include_game_value=False)
+            )
             title = "RaiderMarket Trade Values (Watchlist)"
         else:
             ranked = sorted(
@@ -1153,7 +1184,9 @@ class TraderBot(commands.Bot):
                 reverse=True,
             )
             top_items = ranked[:RAIDERMARKET_TOP_COUNT]
-            description_lines.extend(format_trade_value_lines(top_items))
+            description_lines.extend(
+                format_trade_value_lines(top_items, include_game_value=False)
+            )
             title = f"RaiderMarket Top {len(top_items)} Trade Values"
 
         if not description_lines:
