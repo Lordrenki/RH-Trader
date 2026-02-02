@@ -1087,6 +1087,31 @@ class Database:
                 )
                 await db.commit()
 
+    async def adjust_rep(
+        self,
+        user_id: int,
+        *,
+        positive_delta: int = 0,
+        negative_delta: int = 0,
+    ) -> tuple[int, int]:
+        await self.ensure_user(user_id)
+        async with self._lock:
+            async with self._connect() as db:
+                cursor = await db.execute(
+                    "SELECT rep_positive, rep_negative FROM users WHERE user_id = ?",
+                    (user_id,),
+                )
+                row = await cursor.fetchone()
+                current_positive, current_negative = row or (0, 0)
+                new_positive = max(0, current_positive + positive_delta)
+                new_negative = max(0, current_negative + negative_delta)
+                await db.execute(
+                    "UPDATE users SET rep_positive = ?, rep_negative = ? WHERE user_id = ?",
+                    (new_positive, new_negative, user_id),
+                )
+                await db.commit()
+        return new_positive, new_negative
+
     async def leaderboard(self, limit: int = 10) -> List[Tuple[int, int, int, int, bool]]:
         async with self._connect() as db:
             cursor = await db.execute(
