@@ -38,6 +38,7 @@ TRADE_INACTIVITY_WARNING_SECONDS = 12 * 60 * 60
 TRADE_INACTIVITY_CLOSE_SECONDS = 24 * 60 * 60
 REP_LEVEL_ROLE_ID = 1_433_701_792_721_666_128
 ADMIN_ROLE_ID = 927_355_923_364_720_651
+EDIT_REP_ROLE_IDS = {ADMIN_ROLE_ID, 927_355_923_364_720_650}
 REP_LEVEL_ROLE_THRESHOLD = 5
 RAIDERMARKET_REFRESH_SECONDS = 15 * 60
 RAIDERMARKET_TOP_COUNT = 25
@@ -529,7 +530,7 @@ class TraderBot(commands.Bot):
 
             member = interaction.user
             if not isinstance(member, discord.Member) or not any(
-                role.id == ADMIN_ROLE_ID for role in member.roles
+                role.id in EDIT_REP_ROLE_IDS for role in member.roles
             ):
                 await interaction.response.send_message(
                     embed=info_embed(
