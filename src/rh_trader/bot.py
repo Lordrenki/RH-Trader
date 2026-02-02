@@ -566,14 +566,14 @@ class TraderBot(commands.Bot):
                 ephemeral=True,
             )
 
-        @self.tree.command(description="Search community inventories or wishlists for an item")
+        @self.tree.command(description="Search community stock or wishlists for an item")
         @app_commands.describe(
             item="Keyword to search for",
-            location="Choose whether to search inventory or wishlist entries",
+            location="Choose whether to search stock or wishlist entries",
         )
         @app_commands.choices(
             location=[
-                app_commands.Choice(name="Inventory", value="stock"),
+                app_commands.Choice(name="Stock", value="stock"),
                 app_commands.Choice(name="Wishlist", value="wishlist"),
             ]
         )
@@ -627,7 +627,7 @@ class TraderBot(commands.Bot):
                 description = (
                     "\n".join(lines)
                     if lines
-                    else "No matching inventory items found from members of this server."
+                    else "No matching stock items found from members of this server."
                 )
 
             embed = info_embed("🔎 Search results", description)
@@ -643,7 +643,7 @@ class TraderBot(commands.Bot):
             embed = info_embed(
                 "🏪 Store menu",
                 (
-                    "Manage your inventory, wishlist, and alerts in one place. "
+                    "Manage your stock, wishlist, and alerts in one place. "
                     "Use **Post Store** to share your listings in the trade channel."
                 ),
             )
@@ -667,24 +667,6 @@ class TraderBot(commands.Bot):
             interaction: discord.Interaction, image: Optional[discord.Attachment] = None
         ):
             await self._post_store(interaction, image=image)
-
-        @self.tree.command(name="inventory", description="Open a quick inventory control panel")
-        async def inventory(interaction: discord.Interaction):
-            embed = info_embed(
-                "🧰 Inventory menu",
-                (
-                    "Manage your inventory from one place. Add items, adjust quantities, and"
-                    " clean up your list without typing slash commands."
-                ),
-            )
-            await interaction.response.send_message(
-                embed=embed,
-                view=InventoryMenuView(
-                    self.db,
-                    self.stock_actions,
-                ),
-                ephemeral=True,
-            )
 
         @self.tree.command(description="Show a trading profile")
         @app_commands.describe(user="Optionally view another member's profile")
@@ -1345,11 +1327,11 @@ class TraderBot(commands.Bot):
 
         for idx, page in enumerate(stock_pages[:max_pages], start=1):
             suffix = f" (Page {idx}/{min(len(stock_pages), max_pages)})" if len(stock_pages) > 1 else ""
-            embed.add_field(name=f"📦 Inventory{suffix}", value=page, inline=False)
+            embed.add_field(name=f"📦 Stock{suffix}", value=page, inline=False)
         if len(stock_pages) > max_pages:
             embed.add_field(
-                name="📦 Inventory (More items)",
-                value="Inventory list is long. Use `/stock view` for the full list.",
+                name="📦 Stock (More items)",
+                value="Stock list is long. Use `/stock view` for the full list.",
                 inline=False,
             )
 
@@ -1629,7 +1611,7 @@ class TraderBot(commands.Bot):
             embed = discord.Embed(
                 title="🔔 Item alert matched",
                 description=(
-                    f"<@{poster.id}> just updated their inventory with item(s) you're watching."
+                    f"<@{poster.id}> just updated their stock with item(s) you're watching."
                 ),
                 color=color,
             )
@@ -1666,11 +1648,11 @@ class StockGroup(app_commands.Group):
         ]
         | None = None,
     ):
-        super().__init__(name="stock", description="Manage your inventory list")
+        super().__init__(name="stock", description="Manage your stock list")
         self.db = db
         self._alert_notifier = alert_notifier
 
-    @app_commands.command(name="add", description="Add an item to your inventory list")
+    @app_commands.command(name="add", description="Add an item to your stock list")
     @app_commands.describe(item="Item name", quantity="How many you have")
     async def add(self, interaction: discord.Interaction, item: str, quantity: int = 1):
         qty = max(1, quantity)
@@ -1694,13 +1676,13 @@ class StockGroup(app_commands.Group):
                 item_name = match[0]
 
         if not any(name.lower() == item_name.lower() for name, _ in stock):
-            if await _enforce_listing_limit(interaction, len(stock), "inventory"):
+            if await _enforce_listing_limit(interaction, len(stock), "stock"):
                 return
 
         await self.db.add_stock(interaction.user.id, item_name, qty)
         embed = info_embed(
-            "📦 Inventory updated",
-            f"Added **{item_name}** x{qty} to your inventory.{match_note}",
+            "📦 Stock updated",
+            f"Added **{item_name}** x{qty} to your stock.{match_note}",
         )
         await _send_interaction_message(interaction, embed=embed, ephemeral=True)
         if self._alert_notifier:
@@ -1709,17 +1691,17 @@ class StockGroup(app_commands.Group):
 
     @app_commands.command(
         name="change",
-        description="Change the quantity for an item in your inventory list",
+        description="Change the quantity for an item in your stock list",
     )
     @app_commands.describe(
-        item="Item to update (fuzzy matched against your inventory)",
+        item="Item to update (fuzzy matched against your stock)",
         quantity="New quantity you have",
     )
     async def change(self, interaction: discord.Interaction, item: str, quantity: int):
         stock = await self.db.get_stock(interaction.user.id)
         if not stock:
             await interaction.response.send_message(
-                embed=info_embed("No inventory found", "Add something first to change it."),
+                embed=info_embed("No stock found", "Add something first to change it."),
                 ephemeral=True,
             )
             return
@@ -1738,7 +1720,7 @@ class StockGroup(app_commands.Group):
             await interaction.response.send_message(
                 embed=info_embed(
                     "🔍 No close match",
-                    "I couldn't find anything that looks like that in your inventory.",
+                    "I couldn't find anything that looks like that in your stock.",
                 ),
                 ephemeral=True,
             )
@@ -1750,12 +1732,12 @@ class StockGroup(app_commands.Group):
         await self.db.update_stock_quantity(interaction.user.id, best_name, new_qty)
 
         if new_qty == 0:
-            message = f"Removed **{best_name}** from your inventory."
+            message = f"Removed **{best_name}** from your stock."
         else:
             message = f"Updated **{best_name}** to x{new_qty} (was x{current_qty})."
 
         await interaction.response.send_message(
-            embed=info_embed("📦 Inventory updated", message),
+            embed=info_embed("📦 Stock updated", message),
             ephemeral=True,
         )
         if self._alert_notifier and new_qty > 0:
@@ -1766,31 +1748,31 @@ class StockGroup(app_commands.Group):
         target = user or interaction.user
         if not _can_view_other(interaction, target):
             await interaction.response.send_message(
-                embed=info_embed("🚫 Permission denied", "You can only view your own inventory."),
+                embed=info_embed("🚫 Permission denied", "You can only view your own stock."),
                 ephemeral=True,
             )
             return
         items = await self.db.get_stock(target.id)
-        embed = info_embed(f"📦 Inventory for {target.display_name}", format_stock(items))
+        embed = info_embed(f"📦 Stock for {target.display_name}", format_stock(items))
         await interaction.response.send_message(embed=embed)
 
     async def clear_list(self, interaction: discord.Interaction):
         await self.db.clear_stock(interaction.user.id)
-        embed = info_embed("🗑️ Inventory cleared", "Your inventory list is now empty.")
+        embed = info_embed("🗑️ Stock cleared", "Your stock list is now empty.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="view", description="View inventory for you or another member")
+    @app_commands.command(name="view", description="View stock for you or another member")
     @app_commands.describe(user="Member to view")
     async def view(self, interaction: discord.Interaction, user: Optional[discord.User] = None):
         await self.show(interaction, user)
 
-    @app_commands.command(name="remove", description="Remove an item from your inventory list")
-    @app_commands.describe(item="Item to remove (fuzzy matched against your inventory)")
+    @app_commands.command(name="remove", description="Remove an item from your stock list")
+    @app_commands.describe(item="Item to remove (fuzzy matched against your stock)")
     async def remove(self, interaction: discord.Interaction, item: str):
         stock = await self.db.get_stock(interaction.user.id)
         if not stock:
             await interaction.response.send_message(
-                embed=info_embed("No inventory found", "Add something first to remove it."),
+                embed=info_embed("No stock found", "Add something first to remove it."),
                 ephemeral=True,
             )
             return
@@ -1809,7 +1791,7 @@ class StockGroup(app_commands.Group):
             await interaction.response.send_message(
                 embed=info_embed(
                     "🔍 No close match",
-                    "I couldn't find anything that looks like that in your inventory.",
+                    "I couldn't find anything that looks like that in your stock.",
                 ),
                 ephemeral=True,
             )
@@ -1818,16 +1800,16 @@ class StockGroup(app_commands.Group):
         best_name = match[0]
         removed = await self.db.remove_stock(interaction.user.id, best_name)
         message = (
-            f"Removed **{best_name}** from your inventory."
+            f"Removed **{best_name}** from your stock."
             if removed
             else "Item not found anymore."
         )
         await interaction.response.send_message(
-            embed=info_embed("🧹 Inventory cleanup", message),
+            embed=info_embed("🧹 Stock cleanup", message),
             ephemeral=True,
         )
 
-    @app_commands.command(name="clear", description="Clear all items from your inventory list")
+    @app_commands.command(name="clear", description="Clear all items from your stock list")
     async def clear(self, interaction: discord.Interaction):
         await self.clear_list(interaction)
 
@@ -2021,7 +2003,7 @@ class ConfirmClearView(discord.ui.View):
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="↩️")
     async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.edit_message(
-            embed=info_embed("Inventory unchanged", "No items were removed."), view=None
+            embed=info_embed("Stock unchanged", "No items were removed."), view=None
         )
 
 
@@ -2066,7 +2048,7 @@ class ConfirmNegativeRepView(discord.ui.View):
 
 class StockAddModal(discord.ui.Modal):
     def __init__(self, handler: StockGroup):
-        super().__init__(title="Add to inventory")
+        super().__init__(title="Add to stock")
         self._handler = handler
         self.item_input = discord.ui.TextInput(
             label="Item",
@@ -2120,10 +2102,10 @@ class WishlistAddModal(discord.ui.Modal):
 
 class RemoveStockModal(discord.ui.Modal):
     def __init__(self, handler: StockGroup):
-        super().__init__(title="Remove from inventory")
+        super().__init__(title="Remove from stock")
         self._handler = handler
         self.item_input = discord.ui.TextInput(
-            label="Inventory item",
+            label="Stock item",
             placeholder="What do you want to remove?",
             max_length=100,
         )
@@ -2137,10 +2119,10 @@ class RemoveStockModal(discord.ui.Modal):
 
 class StockChangeModal(discord.ui.Modal):
     def __init__(self, handler: StockGroup):
-        super().__init__(title="Update inventory quantity")
+        super().__init__(title="Update stock quantity")
         self._handler = handler
         self.item_input = discord.ui.TextInput(
-            label="Inventory item",
+            label="Stock item",
             placeholder="Which item should be updated?",
             max_length=100,
         )
@@ -2253,69 +2235,6 @@ class TimezoneModal(discord.ui.Modal):
         )
 
 
-class InventoryMenuView(discord.ui.View):
-    def __init__(self, db: Database, stock_handler: StockGroup):
-        super().__init__(timeout=600)
-        self.db = db
-        self._stock_handler = stock_handler
-
-    async def _confirm_clear_stock(self, interaction: discord.Interaction) -> None:
-        async def confirm(inter: discord.Interaction) -> None:
-            await self._stock_handler.clear_list(inter)
-            if inter.message:
-                try:
-                    await inter.followup.edit_message(
-                        inter.message.id,
-                        embed=info_embed(
-                            "🧹 Inventory cleared", "Your inventory list is now empty."
-                        ),
-                        view=None,
-                    )
-                except discord.HTTPException:
-                    pass
-
-        view = ConfirmClearView(confirm)
-        await interaction.response.send_message(
-            embed=info_embed("Confirm", "This will remove all inventory entries."),
-            view=view,
-            ephemeral=True,
-        )
-
-    @discord.ui.button(label="View Inventory", style=discord.ButtonStyle.secondary, emoji="📦", row=0)
-    async def stock_view(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self._stock_handler.show(interaction, None)
-
-    @discord.ui.button(label="Add Item", style=discord.ButtonStyle.primary, emoji="🧺", row=0)
-    async def stock_add(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await interaction.response.send_modal(StockAddModal(self._stock_handler))
-
-    @discord.ui.button(label="Adjust Quantity", style=discord.ButtonStyle.primary, emoji="🧮", row=0)
-    async def stock_change(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await interaction.response.send_modal(StockChangeModal(self._stock_handler))
-
-    @discord.ui.button(label="Remove Item", style=discord.ButtonStyle.secondary, emoji="➖", row=1)
-    async def stock_remove(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await interaction.response.send_modal(RemoveStockModal(self._stock_handler))
-
-    @discord.ui.button(label="Clear Inventory", style=discord.ButtonStyle.danger, emoji="🧹", row=1)
-    async def stock_clear(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await self._confirm_clear_stock(interaction)
-
-    @discord.ui.button(label="Set Bio", style=discord.ButtonStyle.secondary, emoji="✍️", row=2)
-    async def set_bio(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await interaction.response.send_modal(BioModal(self.db))
-
-    @discord.ui.button(label="Set Time Zone", style=discord.ButtonStyle.secondary, emoji="🕰️", row=2)
-    async def set_timezone(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await interaction.response.send_modal(TimezoneModal(self.db))
-
-    @discord.ui.button(label="Close", style=discord.ButtonStyle.primary, emoji="🚪", row=2)
-    async def close(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await interaction.response.edit_message(
-            embed=info_embed("Closed", "You can reopen /inventory anytime."), view=None
-        )
-
-
 class StoreMenuView(discord.ui.View):
     def __init__(
         self,
@@ -2340,24 +2259,22 @@ class StoreMenuView(discord.ui.View):
                 with contextlib.suppress(discord.HTTPException):
                     await inter.followup.edit_message(
                         inter.message.id,
-                        embed=info_embed(
-                            "🧹 Inventory cleared", "Your inventory list is now empty."
-                        ),
+                        embed=info_embed("🧹 Stock cleared", "Your stock list is now empty."),
                         view=None,
                     )
 
         view = ConfirmClearView(confirm)
         await interaction.response.send_message(
-            embed=info_embed("Confirm", "This will remove all inventory entries."),
+            embed=info_embed("Confirm", "This will remove all stock entries."),
             view=view,
             ephemeral=True,
         )
 
-    @discord.ui.button(label="View Inventory", style=discord.ButtonStyle.secondary, emoji="📦", row=0)
+    @discord.ui.button(label="View Stock", style=discord.ButtonStyle.secondary, emoji="📦", row=0)
     async def stock_view(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self._stock_handler.show(interaction, None)
 
-    @discord.ui.button(label="Add Inventory", style=discord.ButtonStyle.primary, emoji="🧺", row=0)
+    @discord.ui.button(label="Add Stock", style=discord.ButtonStyle.primary, emoji="🧺", row=0)
     async def stock_add(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.send_modal(StockAddModal(self._stock_handler))
 
@@ -2365,11 +2282,11 @@ class StoreMenuView(discord.ui.View):
     async def stock_change(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.send_modal(StockChangeModal(self._stock_handler))
 
-    @discord.ui.button(label="Remove Inventory", style=discord.ButtonStyle.secondary, emoji="➖", row=0)
+    @discord.ui.button(label="Remove Stock", style=discord.ButtonStyle.secondary, emoji="➖", row=0)
     async def stock_remove(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.send_modal(RemoveStockModal(self._stock_handler))
 
-    @discord.ui.button(label="Clear Inventory", style=discord.ButtonStyle.danger, emoji="🧹", row=0)
+    @discord.ui.button(label="Clear Stock", style=discord.ButtonStyle.danger, emoji="🧹", row=0)
     async def stock_clear(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self._confirm_clear_stock(interaction)
 
@@ -2397,11 +2314,19 @@ class StoreMenuView(discord.ui.View):
     async def alerts_remove(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.send_modal(AlertRemoveModal(self._alert_handler))
 
-    @discord.ui.button(label="Post Store", style=discord.ButtonStyle.success, emoji="🛒", row=2)
+    @discord.ui.button(label="Set Bio", style=discord.ButtonStyle.secondary, emoji="✍️", row=2)
+    async def set_bio(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(BioModal(self.db))
+
+    @discord.ui.button(label="Set Time Zone", style=discord.ButtonStyle.secondary, emoji="🕰️", row=2)
+    async def set_timezone(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(TimezoneModal(self.db))
+
+    @discord.ui.button(label="Post Store", style=discord.ButtonStyle.success, emoji="🛒", row=3)
     async def post_store(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self._post_callback(interaction)
 
-    @discord.ui.button(label="Close", style=discord.ButtonStyle.primary, emoji="🚪", row=2)
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.primary, emoji="🚪", row=3)
     async def close(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.edit_message(
             embed=info_embed("Closed", "You can reopen /store anytime."), view=None
