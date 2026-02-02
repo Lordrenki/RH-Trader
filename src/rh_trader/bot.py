@@ -1340,6 +1340,25 @@ class TraderBot(commands.Bot):
         *,
         image: discord.Attachment | None = None,
     ) -> None:
+        (
+            _,
+            rep_level,
+            _,
+            _,
+            _,
+            _,
+            _,
+        ) = await self.db.profile(interaction.user.id)
+        if rep_level < REP_LEVEL_ROLE_THRESHOLD:
+            await _send_interaction_message(
+                interaction,
+                embed=info_embed(
+                    "🚫 Rep level too low",
+                    f"You must be Rep Level {REP_LEVEL_ROLE_THRESHOLD} to post a store.",
+                ),
+                ephemeral=True,
+            )
+            return
         if interaction.guild is None:
             await _send_interaction_message(
                 interaction,
