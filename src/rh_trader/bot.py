@@ -516,11 +516,9 @@ class TraderBot(commands.Bot):
 
         @self.tree.command(name="editrep", description="Manually adjust a user's rep level")
         @app_commands.describe(user="Member whose rep level you want to change")
-        @app_commands.describe(level="New rep level (0-200)")
         async def editrep(
             interaction: discord.Interaction,
             user: discord.Member,
-            level: app_commands.Range[int, 0, 200],
         ):
             if interaction.guild is None:
                 await interaction.response.send_message(
@@ -541,28 +539,12 @@ class TraderBot(commands.Bot):
                     ephemeral=True,
                 )
                 return
-
-            await db.set_rep_level(user.id, int(level))
-            (
-                _,
-                rep_level,
-                rep_positive,
-                rep_negative,
-                *_,
-                stored_premium,
-            ) = await db.profile(user.id)
-            premium_flag = bool(stored_premium)
-            await _maybe_assign_rep_role(interaction.guild, user, rep_level)
             await interaction.response.send_message(
                 embed=info_embed(
-                    f"✅ Rep updated for {user.display_name}",
-                    rep_level_summary(
-                        rep_level,
-                        rep_positive,
-                        rep_negative,
-                        premium_boost=premium_flag,
-                    ),
+                    "🛠️ Edit rep",
+                    f"Choose whether to add or remove rep for {user.mention}.",
                 ),
+                view=AdminEditRepView(db, user, interaction.user.id),
                 ephemeral=True,
             )
 
@@ -2044,6 +2026,116 @@ class ConfirmNegativeRepView(discord.ui.View):
         with contextlib.suppress(discord.HTTPException):
             if interaction.message:
                 await interaction.message.edit(view=self)
+
+
+class AdminRepAdjustModal(discord.ui.Modal):
+    def __init__(
+        self,
+        db: Database,
+        target: discord.Member,
+        author_id: int,
+        *,
+        positive: bool,
+    ) -> None:
+        title = "Add rep" if positive else "Remove rep"
+        super().__init__(title=title)
+        self.db = db
+        self.target = target
+        self.author_id = author_id
+        self.positive = positive
+        self.amount_input = discord.ui.TextInput(
+            label="Amount to add" if positive else "Amount to remove",
+            placeholder="1",
+            max_length=5,
+        )
+        self.add_item(self.amount_input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                embed=info_embed("🚫 Not allowed", "Only the command author can do this."),
+                ephemeral=True,
+            )
+            return
+
+        raw_amount = (self.amount_input.value or "").strip()
+        try:
+            amount = int(raw_amount)
+        except ValueError:
+            amount = 0
+
+        if amount <= 0:
+            await interaction.response.send_message(
+                embed=info_embed("⚠️ Invalid amount", "Enter a whole number greater than 0."),
+                ephemeral=True,
+            )
+            return
+
+        positive_delta = amount if self.positive else -amount
+        await self.db.adjust_rep(self.target.id, positive_delta=positive_delta)
+        (
+            _,
+            rep_level,
+            rep_positive,
+            rep_negative,
+            *_,
+            stored_premium,
+        ) = await self.db.profile(self.target.id)
+        premium_flag = bool(stored_premium)
+        guild = interaction.guild
+        if guild is not None:
+            await _maybe_assign_rep_role(guild, self.target, rep_level)
+        await interaction.response.send_message(
+            embed=info_embed(
+                f"✅ Rep updated for {self.target.display_name}",
+                rep_level_summary(
+                    rep_level,
+                    rep_positive,
+                    rep_negative,
+                    premium_boost=premium_flag,
+                ),
+            ),
+            ephemeral=True,
+        )
+
+
+class AdminEditRepView(discord.ui.View):
+    def __init__(self, db: Database, target: discord.Member, author_id: int) -> None:
+        super().__init__(timeout=120)
+        self.db = db
+        self.target = target
+        self.author_id = author_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                embed=info_embed("🚫 Not allowed", "Only the command author can use this."),
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Add rep", style=discord.ButtonStyle.success, emoji="👍")
+    async def add_rep(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(
+            AdminRepAdjustModal(
+                self.db,
+                self.target,
+                self.author_id,
+                positive=True,
+            )
+        )
+
+    @discord.ui.button(label="Remove rep", style=discord.ButtonStyle.danger, emoji="👎")
+    async def remove_rep(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(
+            AdminRepAdjustModal(
+                self.db,
+                self.target,
+                self.author_id,
+                positive=False,
+            )
+        )
 
 
 class StockAddModal(discord.ui.Modal):
