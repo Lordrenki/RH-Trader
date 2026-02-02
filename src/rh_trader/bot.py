@@ -75,6 +75,21 @@ def _trim_preview(text: str, limit: int = 200) -> str:
     return f"{trimmed[: max(0, limit - 3)].rstrip()}..."
 
 
+def _resolve_image_url(attachment: discord.Attachment | None) -> str | None:
+    if attachment is None:
+        return None
+
+    content_type = attachment.content_type or ""
+    if content_type.startswith("image/"):
+        return attachment.url
+
+    filename = attachment.filename.lower()
+    if filename.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")):
+        return attachment.url
+
+    return None
+
+
 def _extract_rep_reason(content: str, target_id: int) -> str:
     cleaned = re.sub(r"(?:^|\s)[+-]\s*rep\b", " ", content, flags=re.IGNORECASE)
     cleaned = re.sub(rf"<@!?{target_id}>", " ", cleaned)
@@ -623,6 +638,36 @@ class TraderBot(commands.Bot):
                 ),
             )
 
+        @self.tree.command(name="store", description="Open the all-in-one trading control panel")
+        async def store(interaction: discord.Interaction):
+            embed = info_embed(
+                "🏪 Store menu",
+                (
+                    "Manage your inventory, wishlist, and alerts in one place. "
+                    "Use **Post Store** to share your listings in the trade channel."
+                ),
+            )
+            await interaction.response.send_message(
+                embed=embed,
+                view=StoreMenuView(
+                    self.db,
+                    self.stock_actions,
+                    self.wishlist_actions,
+                    self.alert_actions,
+                    post_callback=self._post_store,
+                ),
+                ephemeral=True,
+            )
+
+        @self.tree.command(
+            name="poststore", description="Post your store embed to the trade channel"
+        )
+        @app_commands.describe(image="Optional image to attach to your store post")
+        async def poststore(
+            interaction: discord.Interaction, image: Optional[discord.Attachment] = None
+        ):
+            await self._post_store(interaction, image=image)
+
         @self.tree.command(name="inventory", description="Open a quick inventory control panel")
         async def inventory(interaction: discord.Interaction):
             embed = info_embed(
@@ -788,6 +833,43 @@ class TraderBot(commands.Bot):
                 embed=info_embed(
                     "✅ Trade thread channel saved",
                     f"New trade threads will be created in {channel.mention}.",
+                ),
+                ephemeral=True,
+            )
+
+        @self.tree.command(
+            name="set_trade_channel",
+            description="Set the channel where store posts should be created for this server",
+        )
+        @app_commands.describe(channel="Channel where store posts will be shared")
+        async def set_trade_channel(
+            interaction: discord.Interaction, channel: discord.TextChannel
+        ):
+            if interaction.guild is None:
+                await interaction.response.send_message(
+                    embed=info_embed(
+                        "🌐 Guild only", "This command can only be used inside a server."
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            perms = getattr(interaction.user, "guild_permissions", None)
+            if not (perms and (perms.manage_guild or perms.administrator)):
+                await interaction.response.send_message(
+                    embed=info_embed(
+                        "🚫 Missing permissions",
+                        "You need Manage Server or Administrator permissions to set the trade channel.",
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            await db.set_trade_channel(interaction.guild.id, channel.id)
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "✅ Trade channel saved",
+                    f"New store posts will be created in {channel.mention}.",
                 ),
                 ephemeral=True,
             )
@@ -1209,6 +1291,171 @@ class TraderBot(commands.Bot):
 
     def _alert_limit(self, interaction: discord.Interaction) -> int:
         return 20
+
+    async def _build_store_embeds(
+        self,
+        poster: discord.abc.User | discord.Member,
+        *,
+        image_url: str | None = None,
+    ) -> list[discord.Embed]:
+        stock = await self.db.get_stock(poster.id)
+        wishlist = await self.db.get_wishlist(poster.id)
+        contact, rep_level, rep_positive, rep_negative, timezone, bio, stored_premium = (
+            await self.db.profile(poster.id)
+        )
+        trades = await self.db.trade_count(poster.id)
+        premium_flag = bool(stored_premium)
+
+        description_lines = [
+            rep_level_summary(
+                rep_level,
+                rep_positive,
+                rep_negative,
+                premium_boost=premium_flag,
+                show_premium_boost_text=False,
+            ),
+            f"🤝 {trades} trade{'s' if trades != 1 else ''} completed",
+            f"💎 Status: {'Premium trader' if premium_flag else 'Standard trader'}",
+        ]
+        if contact:
+            description_lines.append(f"📞 Contact: {contact}")
+        if timezone:
+            description_lines.append(f"🕰️ Time zone: {timezone}")
+        if bio:
+            description_lines.append(f"✍️ Bio: {bio}")
+
+        color = PREMIUM_EMBED_COLOR if premium_flag else DEFAULT_EMBED_COLOR
+        embed = info_embed(
+            f"🏪 {getattr(poster, 'display_name', 'Trader')}'s Store",
+            "\n".join(description_lines),
+            color=color,
+        )
+        embed.set_author(
+            name=getattr(poster, "display_name", str(poster)),
+            icon_url=getattr(poster.display_avatar, "url", None),
+        )
+        if premium_flag:
+            embed.set_thumbnail(url=PREMIUM_BADGE_URL)
+        if image_url:
+            embed.set_image(url=image_url)
+
+        max_pages = 3
+        stock_pages = _paginate_field_entries(stock, format_stock, per_page=10)
+        wishlist_pages = _paginate_field_entries(wishlist, format_wishlist, per_page=10)
+
+        for idx, page in enumerate(stock_pages[:max_pages], start=1):
+            suffix = f" (Page {idx}/{min(len(stock_pages), max_pages)})" if len(stock_pages) > 1 else ""
+            embed.add_field(name=f"📦 Inventory{suffix}", value=page, inline=False)
+        if len(stock_pages) > max_pages:
+            embed.add_field(
+                name="📦 Inventory (More items)",
+                value="Inventory list is long. Use `/stock view` for the full list.",
+                inline=False,
+            )
+
+        for idx, page in enumerate(wishlist_pages[:max_pages], start=1):
+            suffix = (
+                f" (Page {idx}/{min(len(wishlist_pages), max_pages)})"
+                if len(wishlist_pages) > 1
+                else ""
+            )
+            embed.add_field(name=f"🎯 Wishlist{suffix}", value=page, inline=False)
+        if len(wishlist_pages) > max_pages:
+            embed.add_field(
+                name="🎯 Wishlist (More items)",
+                value="Wishlist list is long. Use `/wishlist view` for the full list.",
+                inline=False,
+            )
+
+        return [embed]
+
+    async def _post_store(
+        self,
+        interaction: discord.Interaction,
+        *,
+        image: discord.Attachment | None = None,
+    ) -> None:
+        if interaction.guild is None:
+            await _send_interaction_message(
+                interaction,
+                embed=info_embed(
+                    "🌐 Guild only",
+                    "Store posts can only be created inside a server.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        channel_id = await self.db.get_trade_channel(interaction.guild.id)
+        if channel_id is None:
+            await _send_interaction_message(
+                interaction,
+                embed=info_embed(
+                    "🚫 Trade channel missing",
+                    "An admin needs to run /set_trade_channel to choose where store posts go.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        channel = self.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.fetch_channel(channel_id)
+            except discord.HTTPException:
+                channel = None
+
+        if not isinstance(channel, discord.TextChannel):
+            await _send_interaction_message(
+                interaction,
+                embed=info_embed(
+                    "🚫 Trade channel missing",
+                    "I can't access the configured trade channel. Please double-check it.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        image_url = _resolve_image_url(image)
+        if image is not None and image_url is None:
+            await _send_interaction_message(
+                interaction,
+                embed=info_embed(
+                    "🖼️ Invalid image",
+                    "Please upload an image file (png, jpg, gif, or webp).",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        embeds = await self._build_store_embeds(interaction.user, image_url=image_url)
+        try:
+            message = await channel.send(
+                content=f"🛒 Store post from <@{interaction.user.id}>",
+                embeds=embeds,
+                allowed_mentions=discord.AllowedMentions(
+                    users=True, roles=False, everyone=False, replied_user=False
+                ),
+            )
+        except discord.HTTPException:
+            await _send_interaction_message(
+                interaction,
+                embed=info_embed(
+                    "❌ Store post failed",
+                    f"I couldn't post in {channel.mention}. Please check my permissions.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        await _send_interaction_message(
+            interaction,
+            embed=info_embed(
+                "✅ Store posted",
+                f"Your store was posted in {channel.mention}.\n{message.jump_url}",
+            ),
+            ephemeral=True,
+        )
 
     async def _open_trade_thread(
         self,
@@ -2066,6 +2313,98 @@ class InventoryMenuView(discord.ui.View):
     async def close(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.edit_message(
             embed=info_embed("Closed", "You can reopen /inventory anytime."), view=None
+        )
+
+
+class StoreMenuView(discord.ui.View):
+    def __init__(
+        self,
+        db: Database,
+        stock_handler: StockGroup,
+        wishlist_handler: WishlistGroup,
+        alert_handler: AlertGroup,
+        *,
+        post_callback: Callable[[discord.Interaction], Awaitable[None]],
+    ):
+        super().__init__(timeout=600)
+        self.db = db
+        self._stock_handler = stock_handler
+        self._wishlist_handler = wishlist_handler
+        self._alert_handler = alert_handler
+        self._post_callback = post_callback
+
+    async def _confirm_clear_stock(self, interaction: discord.Interaction) -> None:
+        async def confirm(inter: discord.Interaction) -> None:
+            await self._stock_handler.clear_list(inter)
+            if inter.message:
+                with contextlib.suppress(discord.HTTPException):
+                    await inter.followup.edit_message(
+                        inter.message.id,
+                        embed=info_embed(
+                            "🧹 Inventory cleared", "Your inventory list is now empty."
+                        ),
+                        view=None,
+                    )
+
+        view = ConfirmClearView(confirm)
+        await interaction.response.send_message(
+            embed=info_embed("Confirm", "This will remove all inventory entries."),
+            view=view,
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="View Inventory", style=discord.ButtonStyle.secondary, emoji="📦", row=0)
+    async def stock_view(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._stock_handler.show(interaction, None)
+
+    @discord.ui.button(label="Add Inventory", style=discord.ButtonStyle.primary, emoji="🧺", row=0)
+    async def stock_add(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(StockAddModal(self._stock_handler))
+
+    @discord.ui.button(label="Adjust Qty", style=discord.ButtonStyle.primary, emoji="🧮", row=0)
+    async def stock_change(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(StockChangeModal(self._stock_handler))
+
+    @discord.ui.button(label="Remove Inventory", style=discord.ButtonStyle.secondary, emoji="➖", row=0)
+    async def stock_remove(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(RemoveStockModal(self._stock_handler))
+
+    @discord.ui.button(label="Clear Inventory", style=discord.ButtonStyle.danger, emoji="🧹", row=0)
+    async def stock_clear(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._confirm_clear_stock(interaction)
+
+    @discord.ui.button(label="View Wishlist", style=discord.ButtonStyle.secondary, emoji="🎯", row=1)
+    async def wishlist_view(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._wishlist_handler.show(interaction, None)
+
+    @discord.ui.button(label="Add Wishlist", style=discord.ButtonStyle.primary, emoji="➕", row=1)
+    async def wishlist_add(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(WishlistAddModal(self._wishlist_handler))
+
+    @discord.ui.button(label="Remove Wishlist", style=discord.ButtonStyle.secondary, emoji="➖", row=1)
+    async def wishlist_remove(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(RemoveWishlistModal(self._wishlist_handler))
+
+    @discord.ui.button(label="View Alerts", style=discord.ButtonStyle.secondary, emoji="🔔", row=1)
+    async def alerts_view(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._alert_handler.show(interaction)
+
+    @discord.ui.button(label="Add Alert", style=discord.ButtonStyle.primary, emoji="🧲", row=1)
+    async def alerts_add(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(AlertAddModal(self._alert_handler))
+
+    @discord.ui.button(label="Remove Alert", style=discord.ButtonStyle.secondary, emoji="🗑️", row=2)
+    async def alerts_remove(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(AlertRemoveModal(self._alert_handler))
+
+    @discord.ui.button(label="Post Store", style=discord.ButtonStyle.success, emoji="🛒", row=2)
+    async def post_store(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._post_callback(interaction)
+
+    @discord.ui.button(label="Close", style=discord.ButtonStyle.primary, emoji="🚪", row=2)
+    async def close(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.edit_message(
+            embed=info_embed("Closed", "You can reopen /store anytime."), view=None
         )
 
 

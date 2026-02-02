@@ -119,6 +119,7 @@ class Database:
 
                 CREATE TABLE IF NOT EXISTS guild_settings (
                     guild_id INTEGER PRIMARY KEY,
+                    trade_channel_id INTEGER,
                     trade_thread_channel_id INTEGER
                 );
 
@@ -208,6 +209,8 @@ class Database:
     async def _ensure_guild_settings_columns(self, db: aiosqlite.Connection) -> None:
         cursor = await db.execute("PRAGMA table_info(guild_settings)")
         columns = {row[1] for row in await cursor.fetchall()}
+        if "trade_channel_id" not in columns:
+            await db.execute("ALTER TABLE guild_settings ADD COLUMN trade_channel_id INTEGER")
         if "trade_thread_channel_id" not in columns:
             await db.execute(
                 "ALTER TABLE guild_settings ADD COLUMN trade_thread_channel_id INTEGER"
@@ -1211,6 +1214,29 @@ class Database:
                     (guild_id, channel_id),
                 )
                 await db.commit()
+
+    async def set_trade_channel(self, guild_id: int, channel_id: Optional[int]) -> None:
+        """Persist the configured trade channel for a guild."""
+
+        async with self._lock:
+            async with self._connect() as db:
+                await db.execute(
+                    "INSERT INTO guild_settings(guild_id, trade_channel_id) VALUES (?, ?)\n"
+                    "ON CONFLICT(guild_id) DO UPDATE SET trade_channel_id = excluded.trade_channel_id",
+                    (guild_id, channel_id),
+                )
+                await db.commit()
+
+    async def get_trade_channel(self, guild_id: int) -> Optional[int]:
+        """Return the configured trade channel, if present."""
+
+        async with self._connect() as db:
+            cursor = await db.execute(
+                "SELECT trade_channel_id FROM guild_settings WHERE guild_id = ?",
+                (guild_id,),
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else None
 
     async def get_trade_thread_channel(self, guild_id: int) -> Optional[int]:
         """Return the configured trade thread channel, if present."""
