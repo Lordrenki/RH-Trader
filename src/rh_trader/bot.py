@@ -2055,16 +2055,20 @@ class AdminRepAdjustModal(discord.ui.Modal):
         target: discord.Member,
         author_id: int,
         *,
-        positive: bool,
+        adjust_positive: bool,
+        increase: bool,
     ) -> None:
-        title = "Add rep" if positive else "Remove rep"
+        action_label = "Add" if increase else "Remove"
+        rep_label = "positive" if adjust_positive else "negative"
+        title = f"{action_label} {rep_label} rep"
         super().__init__(title=title)
         self.db = db
         self.target = target
         self.author_id = author_id
-        self.positive = positive
+        self.adjust_positive = adjust_positive
+        self.increase = increase
         self.amount_input = discord.ui.TextInput(
-            label="Amount to add" if positive else "Amount to remove",
+            label=f"Amount to {action_label.lower()}",
             placeholder="1",
             max_length=5,
         )
@@ -2091,8 +2095,14 @@ class AdminRepAdjustModal(discord.ui.Modal):
             )
             return
 
-        positive_delta = amount if self.positive else -amount
-        await self.db.adjust_rep(self.target.id, positive_delta=positive_delta)
+        delta_value = amount if self.increase else -amount
+        positive_delta = delta_value if self.adjust_positive else 0
+        negative_delta = delta_value if not self.adjust_positive else 0
+        await self.db.adjust_rep(
+            self.target.id,
+            positive_delta=positive_delta,
+            negative_delta=negative_delta,
+        )
         (
             _,
             rep_level,
@@ -2137,23 +2147,82 @@ class AdminEditRepView(discord.ui.View):
 
     @discord.ui.button(label="Add rep", style=discord.ButtonStyle.success, emoji="👍")
     async def add_rep(self, interaction: discord.Interaction, _: discord.ui.Button):
-        await interaction.response.send_modal(
-            AdminRepAdjustModal(
+        await interaction.response.send_message(
+            embed=info_embed(
+                "🛠️ Edit rep",
+                f"Choose which rep bucket to add for {self.target.mention}.",
+            ),
+            AdminRepAdjustPickerView(
                 self.db,
                 self.target,
                 self.author_id,
-                positive=True,
-            )
+                increase=True,
+            ),
+            ephemeral=True,
         )
 
     @discord.ui.button(label="Remove rep", style=discord.ButtonStyle.danger, emoji="👎")
     async def remove_rep(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_message(
+            embed=info_embed(
+                "🛠️ Edit rep",
+                f"Choose which rep bucket to remove for {self.target.mention}.",
+            ),
+            AdminRepAdjustPickerView(
+                self.db,
+                self.target,
+                self.author_id,
+                increase=False,
+            ),
+            ephemeral=True,
+        )
+
+
+class AdminRepAdjustPickerView(discord.ui.View):
+    def __init__(
+        self,
+        db: Database,
+        target: discord.Member,
+        author_id: int,
+        *,
+        increase: bool,
+    ) -> None:
+        super().__init__(timeout=120)
+        self.db = db
+        self.target = target
+        self.author_id = author_id
+        self.increase = increase
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                embed=info_embed("🚫 Not allowed", "Only the command author can use this."),
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="+ Positive rep", style=discord.ButtonStyle.success, emoji="👍")
+    async def add_positive(self, interaction: discord.Interaction, _: discord.ui.Button):
         await interaction.response.send_modal(
             AdminRepAdjustModal(
                 self.db,
                 self.target,
                 self.author_id,
-                positive=False,
+                adjust_positive=True,
+                increase=self.increase,
+            )
+        )
+
+    @discord.ui.button(label="- Negative rep", style=discord.ButtonStyle.danger, emoji="👎")
+    async def add_negative(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_modal(
+            AdminRepAdjustModal(
+                self.db,
+                self.target,
+                self.author_id,
+                adjust_positive=False,
+                increase=self.increase,
             )
         )
 
