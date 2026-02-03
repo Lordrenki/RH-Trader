@@ -2152,7 +2152,7 @@ class AdminEditRepView(discord.ui.View):
                 "🛠️ Edit rep",
                 f"Choose which rep bucket to add for {self.target.mention}.",
             ),
-            AdminRepAdjustPickerView(
+            view=AdminRepAdjustPickerView(
                 self.db,
                 self.target,
                 self.author_id,
@@ -2168,7 +2168,7 @@ class AdminEditRepView(discord.ui.View):
                 "🛠️ Edit rep",
                 f"Choose which rep bucket to remove for {self.target.mention}.",
             ),
-            AdminRepAdjustPickerView(
+            view=AdminRepAdjustPickerView(
                 self.db,
                 self.target,
                 self.author_id,
