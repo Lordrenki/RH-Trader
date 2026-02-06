@@ -115,6 +115,27 @@ def _extract_explicit_rep_target(content: str) -> tuple[str, int] | None:
     return sign, target_id
 
 
+def _trailing_roman_numeral(value: str) -> str | None:
+    match = re.search(r"\b([IVXLCDM]+)\s*$", value.strip(), re.IGNORECASE)
+    if not match:
+        return None
+    return match.group(1).upper()
+
+
+def _can_apply_stock_fuzzy_match(input_name: str, matched_name: str) -> bool:
+    """Guard fuzzy stock-name matching so tiers are not silently changed.
+
+    Names that end with different roman numerals (e.g. II vs III) should be
+    treated as different items even if fuzzy matching score is very high.
+    """
+
+    input_roman = _trailing_roman_numeral(input_name)
+    matched_roman = _trailing_roman_numeral(matched_name)
+    if input_roman and matched_roman and input_roman != matched_roman:
+        return False
+    return True
+
+
 def _paginate_field_entries(entries: list, formatter, per_page: int) -> list[str]:
     """Split entries into field-friendly pages respecting Discord limits."""
 
@@ -1897,9 +1918,10 @@ class StockGroup(app_commands.Group):
             names = [name for name, _ in stock]
             match = process.extractOne(item_name, names, scorer=fuzz.WRatio)
             if match and match[1] >= 90:
-                if match[0].lower() != item_name.lower():
-                    match_note = f" (matched **{match[0]}**)"
-                item_name = match[0]
+                if _can_apply_stock_fuzzy_match(item_name, match[0]):
+                    if match[0].lower() != item_name.lower():
+                        match_note = f" (matched **{match[0]}**)"
+                    item_name = match[0]
 
         if not any(name.lower() == item_name.lower() for name, _ in stock):
             if await _enforce_listing_limit(interaction, len(stock), "stock"):
