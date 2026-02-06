@@ -100,6 +100,21 @@ def _extract_rep_reason(content: str, target_id: int) -> str:
     return cleaned.strip()
 
 
+def _extract_explicit_rep_target(content: str) -> tuple[str, int] | None:
+    """Return the rep sign and explicitly mentioned target from message content.
+
+    This requires the mention to appear directly after the +/-rep token so reply
+    context or other implicit mentions are not treated as the target.
+    """
+
+    match = re.search(r"(?:^|\s)([+-])\s*rep[ \t]+<@!?(\d+)>", content, re.IGNORECASE)
+    if not match:
+        return None
+    sign = match.group(1)
+    target_id = int(match.group(2))
+    return sign, target_id
+
+
 def _paginate_field_entries(entries: list, formatter, per_page: int) -> list[str]:
     """Split entries into field-friendly pages respecting Discord limits."""
 
@@ -400,21 +415,23 @@ class TraderBot(commands.Bot):
             return
 
         normalized_content = unicodedata.normalize("NFKC", message.content.strip())
-        match = re.search(r"(?:^|\s)([+-])\s*rep\b", normalized_content, re.IGNORECASE)
-        if not match:
+        extracted = _extract_explicit_rep_target(normalized_content)
+        if not extracted:
             return
-        if not message.mentions:
+
+        sign, target_id = extracted
+        if not any(user.id == target_id for user in message.mentions):
             await message.channel.send(
                 embed=info_embed(
                     "🚫 Missing mention",
-                    "Please mention a user, e.g. `+rep @user` or `-rep @user`.",
+                    (
+                        "Please use a full mention directly after the command, "
+                        "e.g. `+rep @user` or `-rep @user reason`."
+                    ),
                 )
             )
             return
 
-        sign = match.group(1)
-        target_user = message.mentions[0]
-        target_id = target_user.id
         if target_id == message.author.id:
             await message.channel.send(
                 embed=info_embed("🚫 Invalid target", "You cannot give rep to yourself.")
@@ -782,6 +799,87 @@ class TraderBot(commands.Bot):
 
             embed.add_field(name="📝 Recent reviews", value=reviews_value, inline=False)
             await interaction.response.send_message(embed=embed)
+
+        @self.tree.command(
+            name="7day",
+            description="Remove your new-account trade restriction role once your account is old enough.",
+        )
+        async def seven_day(interaction: discord.Interaction):
+            if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+                await interaction.response.send_message(
+                    embed=info_embed(
+                        "🚫 Guild only",
+                        "This command can only be used in the server.",
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            member = interaction.user
+            role = interaction.guild.get_role(NEW_ACCOUNT_TRADE_RESTRICTED_ROLE_ID)
+            if role is None:
+                await interaction.response.send_message(
+                    embed=info_embed(
+                        "⚠️ Role not found",
+                        (
+                            "I couldn't find the new-account restricted role "
+                            f"(<@&{NEW_ACCOUNT_TRADE_RESTRICTED_ROLE_ID}>)."
+                        ),
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            if _is_under_min_trade_account_age(member):
+                account_age = datetime.now(timezone.utc) - member.created_at
+                remaining = timedelta(days=MIN_TRADE_ACCOUNT_AGE_DAYS) - account_age
+                remaining_seconds = max(0, int(remaining.total_seconds()))
+                await interaction.response.send_message(
+                    embed=info_embed(
+                        "🚫 Not eligible yet",
+                        (
+                            "Your account is still under 7 days old. "
+                            f"Please try again in about {_format_duration(remaining_seconds)}."
+                        ),
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            if role not in member.roles:
+                await interaction.response.send_message(
+                    embed=info_embed(
+                        "✅ All set",
+                        "You do not currently have the new-account restricted role.",
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            try:
+                await member.remove_roles(
+                    role,
+                    reason=(
+                        f"/7day used by member after account age exceeded {MIN_TRADE_ACCOUNT_AGE_DAYS} days"
+                    ),
+                )
+            except discord.HTTPException:
+                await interaction.response.send_message(
+                    embed=info_embed(
+                        "⚠️ Couldn't remove role",
+                        "I couldn't remove the role due to missing permissions.",
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "✅ Restriction removed",
+                    f"Removed <@&{NEW_ACCOUNT_TRADE_RESTRICTED_ROLE_ID}> from your account.",
+                ),
+                ephemeral=True,
+            )
 
         @self.tree.command(description="View top rep levels")
         async def leaderboard(interaction: discord.Interaction):
