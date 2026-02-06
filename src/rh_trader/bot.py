@@ -643,13 +643,18 @@ class TraderBot(commands.Bot):
             if location.value == "wishlist":
                 results = await db.search_wishlist(item)
                 results = await _resolve_guild_members(results)
-                lines = [
-                    (
+                lines = []
+                for member, (_, item, note) in results:
+                    store_link = await self._store_jump_markdown(
+                        interaction.guild.id, member.id
+                    )
+                    line = (
                         f"🔍 {member.display_name} wants **{item}**"
                         + (f" — {note}" if note else "")
                     )
-                    for member, (_, item, note) in results
-                ]
+                    if store_link:
+                        line += f" • {store_link}"
+                    lines.append(line)
                 description = (
                     "\n".join(lines)
                     if lines
@@ -658,12 +663,15 @@ class TraderBot(commands.Bot):
             else:
                 results = await db.search_stock(item)
                 results = await _resolve_guild_members(results)
-                lines = [
-                    (
-                        f"🔍 {member.display_name} has **{item}** (x{qty})"
+                lines = []
+                for member, (_, item, qty) in results:
+                    store_link = await self._store_jump_markdown(
+                        interaction.guild.id, member.id
                     )
-                    for member, (_, item, qty) in results
-                ]
+                    line = f"🔍 {member.display_name} has **{item}** (x{qty})"
+                    if store_link:
+                        line += f" • {store_link}"
+                    lines.append(line)
                 description = (
                     "\n".join(lines)
                     if lines
@@ -684,7 +692,7 @@ class TraderBot(commands.Bot):
                 "🏪 Store menu",
                 (
                     "Manage your stock, wishlist, and alerts in one place. "
-                    "Use **Post Store** to share your listings in the trade channel."
+                    "Use **Post Store** to share your listings in the trade channel or **Update Store** to refresh your existing post."
                 ),
             )
             await interaction.response.send_message(
@@ -1409,11 +1417,21 @@ class TraderBot(commands.Bot):
 
         return [embed]
 
+    async def _store_jump_markdown(self, guild_id: int, user_id: int) -> str | None:
+        store_post = await self.db.get_store_post(guild_id, user_id)
+        if store_post is None:
+            return None
+        channel_id, message_id = store_post
+        return (
+            f"[Store](https://discord.com/channels/{guild_id}/{channel_id}/{message_id})"
+        )
+
     async def _post_store(
         self,
         interaction: discord.Interaction,
         *,
         image: discord.Attachment | None = None,
+        update_existing: bool = False,
     ) -> None:
         (
             _,
@@ -1487,11 +1505,36 @@ class TraderBot(commands.Bot):
             )
             return
 
+        existing = await self.db.get_store_post(interaction.guild.id, interaction.user.id)
+        deleted_previous = False
+        if existing is not None:
+            previous_channel_id, previous_message_id = existing
+            previous_channel = self.get_channel(previous_channel_id)
+            if previous_channel is None:
+                with contextlib.suppress(discord.HTTPException):
+                    previous_channel = await self.fetch_channel(previous_channel_id)
+            if isinstance(previous_channel, discord.TextChannel):
+                with contextlib.suppress(discord.HTTPException):
+                    previous_message = await previous_channel.fetch_message(previous_message_id)
+                    await previous_message.delete()
+                    deleted_previous = True
+
+        if update_existing and not existing:
+            await _send_interaction_message(
+                interaction,
+                embed=info_embed(
+                    "ℹ️ No store post found",
+                    "You don't have an existing store post yet, so I created one now.",
+                ),
+                ephemeral=True,
+            )
+
         embeds = await self._build_store_embeds(interaction.user, image_url=image_url)
         try:
             message = await channel.send(
                 content=f"🛒 Store post from <@{interaction.user.id}>",
                 embeds=embeds,
+                view=StorePostTradeView(seller_id=interaction.user.id),
                 allowed_mentions=discord.AllowedMentions(
                     users=True, roles=False, everyone=False, replied_user=False
                 ),
@@ -1507,11 +1550,19 @@ class TraderBot(commands.Bot):
             )
             return
 
+        await self.db.set_store_post(
+            interaction.guild.id,
+            interaction.user.id,
+            message.channel.id,
+            message.id,
+        )
+
+        action = "updated" if (update_existing or deleted_previous) else "posted"
         await _send_interaction_message(
             interaction,
             embed=info_embed(
-                "✅ Store posted",
-                f"Your store was posted in {channel.mention}.\n{message.jump_url}",
+                f"✅ Store {action}",
+                f"Your store was {action} in {channel.mention}.\n{message.jump_url}",
             ),
             ephemeral=True,
         )
@@ -2491,6 +2542,66 @@ class TimezoneModal(discord.ui.Modal):
         )
 
 
+class StorePostTradeView(discord.ui.View):
+    def __init__(self, seller_id: int) -> None:
+        super().__init__(timeout=None)
+        self.seller_id = seller_id
+        self.start_trade.custom_id = f"store:starttrade:{seller_id}"
+
+    @discord.ui.button(
+        label="Start Trade",
+        style=discord.ButtonStyle.success,
+        emoji="🤝",
+    )
+    async def start_trade(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "🌐 Guild only",
+                    "Store trade actions are only available inside a server.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        partner = interaction.guild.get_member(self.seller_id)
+        if partner is None:
+            try:
+                partner = await interaction.guild.fetch_member(self.seller_id)
+            except discord.HTTPException:
+                partner = None
+
+        if partner is None:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "🚫 Trader unavailable",
+                    "I couldn't find this trader in the server anymore.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        starttrade_command = interaction.client.tree.get_command("starttrade")
+        command_text = (
+            f"Use </starttrade:{starttrade_command.id}> {partner.mention} to begin."
+            if starttrade_command is not None
+            else f"Use /starttrade {partner.mention} to begin."
+        )
+        await interaction.response.send_message(
+            embed=info_embed(
+                "🤝 Start a trade",
+                (
+                    f"Ready to trade with {partner.mention}?\n"
+                    f"{command_text}"
+                ),
+            ),
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions(
+                users=True, roles=False, everyone=False, replied_user=False
+            ),
+        )
+
+
 class StoreMenuView(discord.ui.View):
     def __init__(
         self,
@@ -2499,7 +2610,7 @@ class StoreMenuView(discord.ui.View):
         wishlist_handler: WishlistGroup,
         alert_handler: AlertGroup,
         *,
-        post_callback: Callable[[discord.Interaction], Awaitable[None]],
+        post_callback: Callable[..., Awaitable[None]],
     ):
         super().__init__(timeout=600)
         self.db = db
@@ -2581,6 +2692,10 @@ class StoreMenuView(discord.ui.View):
     @discord.ui.button(label="Post Store", style=discord.ButtonStyle.success, emoji="🛒", row=3)
     async def post_store(self, interaction: discord.Interaction, _: discord.ui.Button):
         await self._post_callback(interaction)
+
+    @discord.ui.button(label="Update Store", style=discord.ButtonStyle.secondary, emoji="♻️", row=3)
+    async def update_store(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await self._post_callback(interaction, update_existing=True)
 
     @discord.ui.button(label="Close", style=discord.ButtonStyle.primary, emoji="🚪", row=3)
     async def close(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -2837,7 +2952,7 @@ class TradeView(BasePersistentView):
         status: str = "pending",
         initiator_id: int | None = None,
     ):
-        super().__init__()
+        super().__init__(timeout=None)
         self.db = db
         self.trade_id = trade_id
         self.seller_id = seller_id
