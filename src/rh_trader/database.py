@@ -123,6 +123,14 @@ class Database:
                     trade_thread_channel_id INTEGER
                 );
 
+                CREATE TABLE IF NOT EXISTS store_posts (
+                    guild_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    channel_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    PRIMARY KEY (guild_id, user_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS active_trades (
                     user_id INTEGER PRIMARY KEY,
                     trade_id INTEGER NOT NULL
@@ -1262,6 +1270,49 @@ class Database:
             )
             row = await cursor.fetchone()
             return row[0] if row else None
+
+    async def set_store_post(
+        self,
+        guild_id: int,
+        user_id: int,
+        channel_id: int,
+        message_id: int,
+    ) -> None:
+        async with self._lock:
+            async with self._connect() as db:
+                await db.execute(
+                    """
+                    INSERT INTO store_posts(guild_id, user_id, channel_id, message_id)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                        channel_id = excluded.channel_id,
+                        message_id = excluded.message_id
+                    """,
+                    (guild_id, user_id, channel_id, message_id),
+                )
+                await db.commit()
+
+    async def get_store_post(self, guild_id: int, user_id: int) -> Optional[Tuple[int, int]]:
+        async with self._connect() as db:
+            cursor = await db.execute(
+                """
+                SELECT channel_id, message_id
+                FROM store_posts
+                WHERE guild_id = ? AND user_id = ?
+                """,
+                (guild_id, user_id),
+            )
+            row = await cursor.fetchone()
+            return (row[0], row[1]) if row else None
+
+    async def clear_store_post(self, guild_id: int, user_id: int) -> None:
+        async with self._lock:
+            async with self._connect() as db:
+                await db.execute(
+                    "DELETE FROM store_posts WHERE guild_id = ? AND user_id = ?",
+                    (guild_id, user_id),
+                )
+                await db.commit()
 
     async def get_trade_thread_channel(self, guild_id: int) -> Optional[int]:
         """Return the configured trade thread channel, if present."""
