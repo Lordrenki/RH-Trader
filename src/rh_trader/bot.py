@@ -40,6 +40,8 @@ REP_LEVEL_ROLE_ID = 1_433_701_792_721_666_128
 ADMIN_ROLE_ID = 927_355_923_364_720_651
 EDIT_REP_ROLE_IDS = {ADMIN_ROLE_ID, 927_355_923_364_720_650}
 REP_LEVEL_ROLE_THRESHOLD = 5
+MIN_TRADE_ACCOUNT_AGE_DAYS = 7
+NEW_ACCOUNT_TRADE_RESTRICTED_ROLE_ID = 1_469_195_768_681_332_987
 RAIDERMARKET_REFRESH_SECONDS = 15 * 60
 RAIDERMARKET_TOP_COUNT = 25
 PREMIUM_BADGE_URL = (
@@ -146,6 +148,61 @@ async def _maybe_assign_rep_role(
 def _listing_limit_for_interaction(interaction: discord.Interaction) -> int:
     """Return how many stock/wishlist entries a user may store."""
     return DEFAULT_LISTING_LIMIT
+
+
+def _is_under_min_trade_account_age(
+    member: discord.Member, *, now: datetime | None = None
+) -> bool:
+    reference_time = now or datetime.now(timezone.utc)
+    min_age = timedelta(days=MIN_TRADE_ACCOUNT_AGE_DAYS)
+    return (reference_time - member.created_at) < min_age
+
+
+async def _enforce_trade_account_age(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    *,
+    actor: str,
+) -> bool:
+    if not _is_under_min_trade_account_age(member):
+        return False
+
+    guild = interaction.guild
+    role = guild.get_role(NEW_ACCOUNT_TRADE_RESTRICTED_ROLE_ID) if guild else None
+    if role is None:
+        _log.warning(
+            "New-account trade restricted role %s not found in guild %s",
+            NEW_ACCOUNT_TRADE_RESTRICTED_ROLE_ID,
+            getattr(guild, "id", "unknown"),
+        )
+    elif role not in member.roles:
+        try:
+            await member.add_roles(
+                role,
+                reason=(
+                    f"Account under {MIN_TRADE_ACCOUNT_AGE_DAYS} days old; trading restricted"
+                ),
+            )
+        except discord.HTTPException:
+            _log.warning(
+                "Failed to assign new-account trade restricted role %s to member %s",
+                role.id,
+                member.id,
+            )
+
+    who = "You are" if actor == "you" else f"{member.mention} is"
+    await _send_interaction_message(
+        interaction,
+        embed=info_embed(
+            "🚫 Trading locked for new account",
+            (
+                f"{who} under {MIN_TRADE_ACCOUNT_AGE_DAYS} days old, so trading is blocked."
+                f" Assigned role <@&{NEW_ACCOUNT_TRADE_RESTRICTED_ROLE_ID}> to enforce this policy."
+            ),
+        ),
+        ephemeral=True,
+    )
+    return True
 
 
 async def _enforce_listing_limit(
@@ -756,6 +813,24 @@ class TraderBot(commands.Bot):
                     ),
                     ephemeral=True,
                 )
+                return
+
+            requester = interaction.user if isinstance(interaction.user, discord.Member) else None
+            if requester is not None:
+                requester_blocked = await _enforce_trade_account_age(
+                    interaction,
+                    requester,
+                    actor="you",
+                )
+                if requester_blocked:
+                    return
+
+            partner_blocked = await _enforce_trade_account_age(
+                interaction,
+                partner,
+                actor="partner",
+            )
+            if partner_blocked:
                 return
 
             await self._open_trade_thread(
