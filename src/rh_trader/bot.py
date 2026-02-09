@@ -1696,7 +1696,7 @@ class TraderBot(commands.Bot):
         initiator_id: int,
     ) -> None:
         if interaction.guild is None:
-            await interaction.response.send_message(
+            await _send_interaction_message(
                 embed=info_embed(
                     "🌐 Guild only",
                     "Trade threads can only be created inside a server.",
@@ -1705,9 +1705,13 @@ class TraderBot(commands.Bot):
             )
             return
 
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+
         channel_id = await self.db.get_trade_thread_channel(interaction.guild.id)
         if channel_id is None:
-            await interaction.response.send_message(
+            await _send_interaction_message(
+                interaction,
                 embed=info_embed(
                     "🚫 Thread channel missing",
                     "An admin needs to run /set_trade_thread_channel to choose where trade threads start.",
@@ -1724,7 +1728,8 @@ class TraderBot(commands.Bot):
                 channel = None
 
         if not isinstance(channel, discord.TextChannel):
-            await interaction.response.send_message(
+            await _send_interaction_message(
+                interaction,
                 embed=info_embed(
                     "🚫 Thread channel missing",
                     "I can't access the configured trade thread channel. Please double-check it.",
@@ -1733,12 +1738,23 @@ class TraderBot(commands.Bot):
             )
             return
 
-        seller = interaction.guild.get_member(seller_id) or await interaction.guild.fetch_member(
-            seller_id
-        )
-        buyer = interaction.guild.get_member(buyer_id) or await interaction.guild.fetch_member(
-            buyer_id
-        )
+        try:
+            seller = interaction.guild.get_member(seller_id) or await interaction.guild.fetch_member(
+                seller_id
+            )
+            buyer = interaction.guild.get_member(buyer_id) or await interaction.guild.fetch_member(
+                buyer_id
+            )
+        except discord.HTTPException:
+            await _send_interaction_message(
+                interaction,
+                embed=info_embed(
+                    "🚫 Trader unavailable",
+                    "I couldn't find one of the traders in this server anymore.",
+                ),
+                ephemeral=True,
+            )
+            return
 
         thread_name = f"trade-{buyer.display_name}-with-{seller.display_name}"
         try:
@@ -1749,7 +1765,8 @@ class TraderBot(commands.Bot):
                 reason="New trade initiated",
             )
         except discord.HTTPException:
-            await interaction.response.send_message(
+            await _send_interaction_message(
+                interaction,
                 embed=info_embed(
                     "❌ Could not create thread",
                     f"I couldn't start a trade thread in {channel.mention}.",
@@ -1804,7 +1821,8 @@ class TraderBot(commands.Bot):
                 "and that I have permission to manage private threads there."
             )
 
-        await interaction.response.send_message(
+        await _send_interaction_message(
+            interaction,
             embed=info_embed("✅ Trade thread ready", description),
             ephemeral=True,
         )
@@ -2701,12 +2719,7 @@ class StorePostTradeView(discord.ui.View):
             )
             return
 
-        starttrade_command = interaction.client.tree.get_command("starttrade")
-        command_text = (
-            f"Use </starttrade:{starttrade_command.id}> {partner.mention} to begin."
-            if starttrade_command is not None
-            else f"Use /starttrade {partner.mention} to begin."
-        )
+        command_text = f"Use /starttrade {partner.mention} to begin."
         await interaction.response.send_message(
             embed=info_embed(
                 "🤝 Start a trade",
