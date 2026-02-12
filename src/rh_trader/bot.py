@@ -923,50 +923,7 @@ class TraderBot(commands.Bot):
             partner: discord.Member,
             item: app_commands.Range[str, 3, 100] = "Custom trade",
         ):
-            if interaction.guild is None:
-                await interaction.response.send_message(
-                    embed=info_embed(
-                        "🌐 Guild only",
-                        "Start trade threads inside a server so I can add everyone to it.",
-                    ),
-                    ephemeral=True,
-                )
-                return
-
-            if partner.id == interaction.user.id:
-                await interaction.response.send_message(
-                    embed=info_embed(
-                        "🚫 Invalid target", "You cannot start a trade thread with yourself."
-                    ),
-                    ephemeral=True,
-                )
-                return
-
-            requester = interaction.user if isinstance(interaction.user, discord.Member) else None
-            if requester is not None:
-                requester_blocked = await _enforce_trade_account_age(
-                    interaction,
-                    requester,
-                    actor="you",
-                )
-                if requester_blocked:
-                    return
-
-            partner_blocked = await _enforce_trade_account_age(
-                interaction,
-                partner,
-                actor="partner",
-            )
-            if partner_blocked:
-                return
-
-            await self._open_trade_thread(
-                interaction,
-                seller_id=partner.id,
-                buyer_id=interaction.user.id,
-                item=item,
-                initiator_id=interaction.user.id,
-            )
+            await self._start_trade_flow(interaction, partner=partner, item=item)
 
         @self.tree.command(
             description="Set the channel where trade threads should be created for this server"
@@ -1697,6 +1654,7 @@ class TraderBot(commands.Bot):
     ) -> None:
         if interaction.guild is None:
             await _send_interaction_message(
+                interaction,
                 embed=info_embed(
                     "🌐 Guild only",
                     "Trade threads can only be created inside a server.",
@@ -1825,6 +1783,58 @@ class TraderBot(commands.Bot):
             interaction,
             embed=info_embed("✅ Trade thread ready", description),
             ephemeral=True,
+        )
+
+    async def _start_trade_flow(
+        self,
+        interaction: discord.Interaction,
+        *,
+        partner: discord.Member,
+        item: str = "Custom trade",
+    ) -> None:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "🌐 Guild only",
+                    "Start trade threads inside a server so I can add everyone to it.",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        if partner.id == interaction.user.id:
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "🚫 Invalid target", "You cannot start a trade thread with yourself."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        requester = interaction.user if isinstance(interaction.user, discord.Member) else None
+        if requester is not None:
+            requester_blocked = await _enforce_trade_account_age(
+                interaction,
+                requester,
+                actor="you",
+            )
+            if requester_blocked:
+                return
+
+        partner_blocked = await _enforce_trade_account_age(
+            interaction,
+            partner,
+            actor="partner",
+        )
+        if partner_blocked:
+            return
+
+        await self._open_trade_thread(
+            interaction,
+            seller_id=partner.id,
+            buyer_id=interaction.user.id,
+            item=item,
+            initiator_id=interaction.user.id,
         )
 
     async def _send_alert_notifications(
@@ -2702,6 +2712,17 @@ class StorePostTradeView(discord.ui.View):
             )
             return
 
+        bot = interaction.client
+        if not isinstance(bot, TraderBot):
+            await interaction.response.send_message(
+                embed=info_embed(
+                    "⚠️ Trade unavailable",
+                    "I couldn't start a trade right now. Please use /starttrade manually.",
+                ),
+                ephemeral=True,
+            )
+            return
+
         partner = interaction.guild.get_member(self.seller_id)
         if partner is None:
             try:
@@ -2719,20 +2740,7 @@ class StorePostTradeView(discord.ui.View):
             )
             return
 
-        command_text = f"Use /starttrade {partner.mention} to begin."
-        await interaction.response.send_message(
-            embed=info_embed(
-                "🤝 Start a trade",
-                (
-                    f"Ready to trade with {partner.mention}?\n"
-                    f"{command_text}"
-                ),
-            ),
-            ephemeral=True,
-            allowed_mentions=discord.AllowedMentions(
-                users=True, roles=False, everyone=False, replied_user=False
-            ),
-        )
+        await bot._start_trade_flow(interaction, partner=partner, item="Store trade")
 
 
 class StoreMenuView(discord.ui.View):
