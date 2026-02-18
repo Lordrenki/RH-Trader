@@ -203,28 +203,7 @@ async def _enforce_trade_account_age(
     if not _is_under_min_trade_account_age(member):
         return False
 
-    guild = interaction.guild
-    role = guild.get_role(NEW_ACCOUNT_TRADE_RESTRICTED_ROLE_ID) if guild else None
-    if role is None:
-        _log.warning(
-            "New-account trade restricted role %s not found in guild %s",
-            NEW_ACCOUNT_TRADE_RESTRICTED_ROLE_ID,
-            getattr(guild, "id", "unknown"),
-        )
-    elif role not in member.roles:
-        try:
-            await member.add_roles(
-                role,
-                reason=(
-                    f"Account under {MIN_TRADE_ACCOUNT_AGE_DAYS} days old; trading restricted"
-                ),
-            )
-        except discord.HTTPException:
-            _log.warning(
-                "Failed to assign new-account trade restricted role %s to member %s",
-                role.id,
-                member.id,
-            )
+    await _assign_new_account_trade_restricted_role(member)
 
     who = "You are" if actor == "you" else f"{member.mention} is"
     await _send_interaction_message(
@@ -239,6 +218,33 @@ async def _enforce_trade_account_age(
         ephemeral=True,
     )
     return True
+
+
+async def _assign_new_account_trade_restricted_role(member: discord.Member) -> None:
+    guild = member.guild
+    role = guild.get_role(NEW_ACCOUNT_TRADE_RESTRICTED_ROLE_ID)
+    if role is None:
+        _log.warning(
+            "New-account trade restricted role %s not found in guild %s",
+            NEW_ACCOUNT_TRADE_RESTRICTED_ROLE_ID,
+            guild.id,
+        )
+        return
+
+    if role in member.roles:
+        return
+
+    try:
+        await member.add_roles(
+            role,
+            reason=f"Account under {MIN_TRADE_ACCOUNT_AGE_DAYS} days old; trading restricted",
+        )
+    except discord.HTTPException:
+        _log.warning(
+            "Failed to assign new-account trade restricted role %s to member %s",
+            role.id,
+            member.id,
+        )
 
 
 async def _enforce_listing_limit(
@@ -430,6 +436,11 @@ class TraderBot(commands.Bot):
             await self._maybe_handle_message_rep(message)
 
         await super().on_message(message)
+
+    async def on_member_join(self, member: discord.Member) -> None:
+        if not _is_under_min_trade_account_age(member):
+            return
+        await _assign_new_account_trade_restricted_role(member)
 
     async def _maybe_handle_message_rep(self, message: discord.Message) -> None:
         if message.guild is None:
