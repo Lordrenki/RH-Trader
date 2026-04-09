@@ -60,6 +60,15 @@ class Database:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS scam_reports (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    discord_user_id INTEGER NOT NULL,
+                    embark_id TEXT NOT NULL,
+                    normalized_embark_id TEXT NOT NULL UNIQUE,
+                    added_by_discord_user_id INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
                 """
             )
             await self._migrate_legacy_rep_to_trading(db)
@@ -166,3 +175,60 @@ class Database:
             return Profile(user_id=user_id, trading=0, knowledge=0, skill=0)
 
         return Profile(user_id=int(row[0]), trading=int(row[1]), knowledge=int(row[2]), skill=int(row[3]))
+
+    @staticmethod
+    def normalize_embark_id(embark_id: str) -> str:
+        return embark_id.strip().lower()
+
+    async def add_scam_report(
+        self,
+        discord_user_id: int,
+        embark_id: str,
+        added_by_discord_user_id: int,
+    ) -> tuple[bool, str]:
+        normalized = self.normalize_embark_id(embark_id)
+        async with self._connect() as db:
+            cursor = await db.execute(
+                """
+                INSERT OR IGNORE INTO scam_reports
+                (
+                    discord_user_id,
+                    embark_id,
+                    normalized_embark_id,
+                    added_by_discord_user_id,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    discord_user_id,
+                    embark_id.strip(),
+                    normalized,
+                    added_by_discord_user_id,
+                    int(time.time()),
+                ),
+            )
+            await db.commit()
+            inserted = cursor.rowcount > 0
+        return inserted, normalized
+
+    async def get_scam_report_by_embark_id(
+        self,
+        embark_id: str,
+    ) -> tuple[int, str, int, int] | None:
+        normalized = self.normalize_embark_id(embark_id)
+        async with self._connect() as db:
+            cursor = await db.execute(
+                """
+                SELECT discord_user_id, embark_id, added_by_discord_user_id, created_at
+                FROM scam_reports
+                WHERE normalized_embark_id = ?
+                LIMIT 1
+                """,
+                (normalized,),
+            )
+            row = await cursor.fetchone()
+
+        if row is None:
+            return None
+        return int(row[0]), str(row[1]), int(row[2]), int(row[3])

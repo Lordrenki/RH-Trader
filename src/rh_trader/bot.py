@@ -38,6 +38,54 @@ class TraderBot(commands.Bot):
         _log.info("Synced %s app command(s)", len(synced))
 
     async def add_core_commands(self) -> None:
+        class ScamReportModal(discord.ui.Modal, title="Add Scam Report"):
+            embark_id = discord.ui.TextInput(
+                label="Embark ID",
+                placeholder="User#1234",
+                required=True,
+                max_length=64,
+            )
+
+            def __init__(
+                self,
+                bot: TraderBot,
+                reported_user: discord.Member,
+                requested_by: discord.abc.User,
+            ) -> None:
+                super().__init__()
+                self.bot = bot
+                self.reported_user = reported_user
+                self.requested_by = requested_by
+
+            async def on_submit(self, interaction: discord.Interaction) -> None:
+                embark_id_value = str(self.embark_id.value).strip()
+                if "#" not in embark_id_value or len(embark_id_value.split("#", 1)[0]) == 0:
+                    await interaction.response.send_message(
+                        "Please provide a valid Embark ID in the format `User#1234`.",
+                        ephemeral=True,
+                    )
+                    return
+
+                inserted, normalized = await self.bot.db.add_scam_report(
+                    discord_user_id=self.reported_user.id,
+                    embark_id=embark_id_value,
+                    added_by_discord_user_id=self.requested_by.id,
+                )
+                if inserted:
+                    await interaction.response.send_message(
+                        (
+                            f"🚨 Added **{self.reported_user.mention}** to the scam database "
+                            f"with Embark ID `{embark_id_value}`."
+                        ),
+                        ephemeral=True,
+                    )
+                    return
+
+                await interaction.response.send_message(
+                    f"That Embark ID is already in the scam database as `{normalized}`.",
+                    ephemeral=True,
+                )
+
         @self.tree.command(name="trade", description="Create a trade thread with another member")
         async def trade(interaction: discord.Interaction, user: discord.Member) -> None:
             if interaction.guild is None:
@@ -125,6 +173,37 @@ class TraderBot(commands.Bot):
             embed.add_field(name="Skill", value=str(p.skill), inline=True)
             embed.add_field(name="Overall", value=str(p.total), inline=False)
             await interaction.response.send_message(embed=embed)
+
+        @self.tree.command(name="scam", description="Add a user to the scam database")
+        @app_commands.describe(user="Discord user to flag")
+        async def scam(interaction: discord.Interaction, user: discord.Member) -> None:
+            if user.bot:
+                await interaction.response.send_message("You can't flag a bot account.", ephemeral=True)
+                return
+            await interaction.response.send_modal(
+                ScamReportModal(bot=self, reported_user=user, requested_by=interaction.user)
+            )
+
+        @self.tree.command(name="check", description="Check an Embark ID against scam history")
+        @app_commands.describe(embark_id="Embark ID to check, e.g. RaiderPro#4821")
+        async def check(interaction: discord.Interaction, embark_id: str) -> None:
+            report = await self.db.get_scam_report_by_embark_id(embark_id)
+            if report is None:
+                await interaction.response.send_message(
+                    f"✅ No scam record found for `{embark_id.strip()}`.",
+                    ephemeral=True,
+                )
+                return
+
+            discord_user_id, stored_embark_id, added_by_id, _ = report
+            await interaction.response.send_message(
+                (
+                    f"⚠️ **Fraud history found** for `{stored_embark_id}`.\n"
+                    f"Linked Discord user: <@{discord_user_id}>\n"
+                    f"Reported by: <@{added_by_id}>"
+                ),
+                ephemeral=True,
+            )
 
 
 def run_bot() -> None:
