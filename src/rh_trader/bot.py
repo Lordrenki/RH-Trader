@@ -13,6 +13,7 @@ from .database import Database, REP_CATEGORIES
 
 _log = logging.getLogger(__name__)
 REP_COOLDOWN_SECONDS = 30 * 60
+SCAM_COMMAND_ROLE_ID = 1367584510656385045
 
 
 def _format_duration(seconds: int) -> str:
@@ -177,6 +178,20 @@ class TraderBot(commands.Bot):
         @self.tree.command(name="scam", description="Add a user to the scam database")
         @app_commands.describe(user="Discord user to flag")
         async def scam(interaction: discord.Interaction, user: discord.Member) -> None:
+            if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+                await interaction.response.send_message(
+                    "This command can only be used in a server.",
+                    ephemeral=True,
+                )
+                return
+
+            if not any(role.id == SCAM_COMMAND_ROLE_ID for role in interaction.user.roles):
+                await interaction.response.send_message(
+                    "You don't have permission to use this command.",
+                    ephemeral=True,
+                )
+                return
+
             if user.bot:
                 await interaction.response.send_message("You can't flag a bot account.", ephemeral=True)
                 return
