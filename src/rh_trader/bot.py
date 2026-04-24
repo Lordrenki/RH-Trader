@@ -14,6 +14,14 @@ from .database import Database, REP_CATEGORIES
 _log = logging.getLogger(__name__)
 REP_COOLDOWN_SECONDS = 30 * 60
 SCAM_COMMAND_ROLE_ID = 1367584510656385045
+TRADE_REP_ROLE_THRESHOLDS = (
+    (10, 1495238466731249665),
+    (25, 1495238526621716681),
+    (50, 1495238582762344518),
+    (100, 1495238632825683968),
+)
+NEW_ACCOUNT_ROLE_ID = 1497024245211988028
+NEW_ACCOUNT_AGE_DAYS = 30
 
 
 def _format_duration(seconds: int) -> str:
@@ -37,6 +45,77 @@ class TraderBot(commands.Bot):
         await self.add_core_commands()
         synced = await self.tree.sync()
         _log.info("Synced %s app command(s)", len(synced))
+
+    @staticmethod
+    def _eligible_rep_role_ids(total_rep: int) -> list[int]:
+        return [role_id for threshold, role_id in TRADE_REP_ROLE_THRESHOLDS if total_rep >= threshold]
+
+    async def _sync_rep_roles_for_member(
+        self,
+        member: discord.Member,
+        total_rep: int,
+    ) -> list[discord.Role]:
+        role_ids = self._eligible_rep_role_ids(total_rep)
+        if not role_ids:
+            return []
+
+        existing_ids = {role.id for role in member.roles}
+        roles_to_add = [
+            role
+            for role_id in role_ids
+            if role_id not in existing_ids and (role := member.guild.get_role(role_id)) is not None
+        ]
+        if not roles_to_add:
+            return []
+
+        try:
+            await member.add_roles(*roles_to_add, reason=f"Reached {total_rep} total positive trade rep")
+        except (discord.Forbidden, discord.HTTPException):
+            _log.exception("Failed to add rep roles to member %s", member.id)
+            return []
+        return roles_to_add
+
+    async def _send_rep_role_award_message(
+        self,
+        channel: discord.abc.Messageable,
+        member: discord.Member,
+        roles_added: list[discord.Role],
+        total_rep: int,
+    ) -> None:
+        role_mentions = ", ".join(role.mention for role in roles_added)
+        try:
+            await channel.send(
+                (
+                    f"🎉 {member.mention} unlocked {role_mentions} "
+                    f"for reaching **{total_rep}** positive trade rep!"
+                )
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            _log.exception("Failed to send rep role award message for member %s", member.id)
+
+    async def _grant_new_account_role_if_needed(self, member: discord.Member) -> bool:
+        account_age = discord.utils.utcnow() - member.created_at
+        if account_age.days >= NEW_ACCOUNT_AGE_DAYS:
+            return False
+
+        role = member.guild.get_role(NEW_ACCOUNT_ROLE_ID)
+        if role is None or role in member.roles:
+            return False
+
+        try:
+            await member.add_roles(
+                role,
+                reason=f"Account age under {NEW_ACCOUNT_AGE_DAYS} days at join",
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            _log.exception("Failed to add new-account role to member %s", member.id)
+            return False
+        return True
+
+    async def on_member_join(self, member: discord.Member) -> None:
+        if member.bot:
+            return
+        await self._grant_new_account_role_if_needed(member)
 
     async def add_core_commands(self) -> None:
         class ScamReportModal(discord.ui.Modal, title="Add Scam Report"):
@@ -160,6 +239,10 @@ class TraderBot(commands.Bot):
             await interaction.response.send_message(
                 f"✅ Added +1 **{category.name}** reputation to {user.mention}."
             )
+            profile = await self.db.get_profile(user.id)
+            roles_added = await self._sync_rep_roles_for_member(user, profile.total)
+            if roles_added and interaction.channel is not None:
+                await self._send_rep_role_award_message(interaction.channel, user, roles_added, profile.total)
 
         @self.tree.command(name="profile", description="View rep profile")
         async def profile(interaction: discord.Interaction, user: discord.Member | None = None) -> None:
@@ -217,6 +300,92 @@ class TraderBot(commands.Bot):
                     f"Linked Discord user: <@{discord_user_id}>\n"
                     f"Reported by: <@{added_by_id}>"
                 ),
+                ephemeral=True,
+            )
+
+        @self.tree.command(
+            name="sync_rep_roles",
+            description="One-time backfill: grant rep milestone roles to existing members",
+        )
+        async def sync_rep_roles(interaction: discord.Interaction) -> None:
+            if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+                await interaction.response.send_message(
+                    "This command can only be used in a server.",
+                    ephemeral=True,
+                )
+                return
+
+            if not interaction.user.guild_permissions.manage_roles:
+                await interaction.response.send_message(
+                    "You need the **Manage Roles** permission to run this command.",
+                    ephemeral=True,
+                )
+                return
+
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            scanned = 0
+            awarded = 0
+            async for member in interaction.guild.fetch_members(limit=None):
+                if member.bot:
+                    continue
+                scanned += 1
+                profile = await self.db.get_profile(member.id)
+                roles_added = await self._sync_rep_roles_for_member(member, profile.total)
+                awarded += len(roles_added)
+
+            await interaction.followup.send(
+                f"Done. Scanned **{scanned}** members and awarded **{awarded}** role(s).",
+                ephemeral=True,
+            )
+
+        @self.tree.command(
+            name="checkage",
+            description="Remove the new-account role if your account is 30+ days old",
+        )
+        async def checkage(interaction: discord.Interaction) -> None:
+            if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+                await interaction.response.send_message(
+                    "This command can only be used in a server.",
+                    ephemeral=True,
+                )
+                return
+
+            role = interaction.guild.get_role(NEW_ACCOUNT_ROLE_ID)
+            if role is None:
+                await interaction.response.send_message(
+                    "The new-account role is not configured in this server.",
+                    ephemeral=True,
+                )
+                return
+
+            member = interaction.user
+            account_age_days = (discord.utils.utcnow() - member.created_at).days
+            if account_age_days < NEW_ACCOUNT_AGE_DAYS:
+                days_left = NEW_ACCOUNT_AGE_DAYS - account_age_days
+                await interaction.response.send_message(
+                    f"Your account is still too new. Try again in **{days_left}** day(s).",
+                    ephemeral=True,
+                )
+                return
+
+            if role not in member.roles:
+                await interaction.response.send_message(
+                    "You don't currently have the new-account role.",
+                    ephemeral=True,
+                )
+                return
+
+            try:
+                await member.remove_roles(role, reason="Account age verified via /checkage")
+            except (discord.Forbidden, discord.HTTPException):
+                await interaction.response.send_message(
+                    "I couldn't remove the role due to missing permissions.",
+                    ephemeral=True,
+                )
+                return
+
+            await interaction.response.send_message(
+                "✅ Your account is old enough now, so the new-account role has been removed.",
                 ephemeral=True,
             )
 
