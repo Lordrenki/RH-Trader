@@ -82,13 +82,14 @@ class TraderBot(commands.Bot):
         roles_added: list[discord.Role],
         total_rep: int,
     ) -> None:
-        role_mentions = ", ".join(role.mention for role in roles_added)
+        role_names = ", ".join(f"`{discord.utils.escape_mentions(role.name)}`" for role in roles_added)
         try:
             await channel.send(
                 (
-                    f"🎉 {member.mention} unlocked {role_mentions} "
+                    f"🎉 {member.mention} unlocked {role_names} "
                     f"for reaching **{total_rep}** positive trade rep!"
-                )
+                ),
+                allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
             )
         except (discord.Forbidden, discord.HTTPException):
             _log.exception("Failed to send rep role award message for member %s", member.id)
