@@ -20,6 +20,13 @@ TRADE_REP_ROLE_THRESHOLDS = (
     (50, 1495238582762344518),
     (100, 1495238632825683968),
 )
+TRIALS_REP_ROLE_THRESHOLDS = (
+    (5, 1500304686425833472),
+    (15, 1500304729375375491),
+    (25, 1500304767145083032),
+    (50, 1500304808425296103),
+)
+SEASON_MANAGER_ROLE_ID = 927355923364720651
 NEW_ACCOUNT_ROLE_ID = 1497024245211988028
 NEW_ACCOUNT_AGE_DAYS = 30
 
@@ -54,8 +61,9 @@ class TraderBot(commands.Bot):
         self,
         member: discord.Member,
         total_rep: int,
+        trials_rep: int,
     ) -> list[discord.Role]:
-        role_ids = self._eligible_rep_role_ids(total_rep)
+        role_ids = self._eligible_rep_role_ids(total_rep) + [role_id for threshold, role_id in TRIALS_REP_ROLE_THRESHOLDS if trials_rep >= threshold]
         if not role_ids:
             return []
 
@@ -241,7 +249,7 @@ class TraderBot(commands.Bot):
                 f"✅ Added +1 **{category.name}** reputation to {user.mention}."
             )
             profile = await self.db.get_profile(user.id)
-            roles_added = await self._sync_rep_roles_for_member(user, profile.total)
+            roles_added = await self._sync_rep_roles_for_member(user, profile.total, profile.trials)
             if roles_added and interaction.channel is not None:
                 await self._send_rep_role_award_message(interaction.channel, user, roles_added, profile.total)
 
@@ -250,13 +258,14 @@ class TraderBot(commands.Bot):
             target = user or interaction.user
             p = await self.db.get_profile(target.id)
             embed = discord.Embed(
-                title=f"{target.display_name}'s Reputation",
-                color=discord.Color.blurple(),
+                title=f"🏆 {target.display_name}'s Reputation Profile",
+                color=discord.Color.gold(),
             )
             embed.add_field(name="Trading", value=str(p.trading), inline=True)
             embed.add_field(name="Knowledge", value=str(p.knowledge), inline=True)
             embed.add_field(name="Skill", value=str(p.skill), inline=True)
-            embed.add_field(name="Overall", value=str(p.total), inline=False)
+            embed.add_field(name="Trials", value=str(p.trials), inline=True)
+            embed.add_field(name="Overall", value=f"**{p.total}**", inline=False)
             await interaction.response.send_message(embed=embed)
 
         @self.tree.command(name="scam", description="Add a user to the scam database")
@@ -331,13 +340,68 @@ class TraderBot(commands.Bot):
                     continue
                 scanned += 1
                 profile = await self.db.get_profile(member.id)
-                roles_added = await self._sync_rep_roles_for_member(member, profile.total)
+                roles_added = await self._sync_rep_roles_for_member(member, profile.total, profile.trials)
                 awarded += len(roles_added)
 
             await interaction.followup.send(
                 f"Done. Scanned **{scanned}** members and awarded **{awarded}** role(s).",
                 ephemeral=True,
             )
+
+
+        @self.tree.command(name="season_start", description="Start a new Trials season")
+        async def season_start(interaction: discord.Interaction) -> None:
+            if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+                await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+                return
+            if not any(role.id == SEASON_MANAGER_ROLE_ID for role in interaction.user.roles):
+                await interaction.response.send_message("You don't have permission to manage seasons.", ephemeral=True)
+                return
+            try:
+                season = await self.db.start_new_trial_season()
+            except ValueError as exc:
+                await interaction.response.send_message(str(exc), ephemeral=True)
+                return
+            await interaction.response.send_message(f"✅ Started Trials Season **{season}**.")
+
+        @self.tree.command(name="season_end", description="End the active Trials season and wipe trial rep")
+        async def season_end(interaction: discord.Interaction) -> None:
+            if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+                await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+                return
+            if not any(role.id == SEASON_MANAGER_ROLE_ID for role in interaction.user.roles):
+                await interaction.response.send_message("You don't have permission to manage seasons.", ephemeral=True)
+                return
+            try:
+                season = await self.db.end_active_trial_season()
+            except ValueError as exc:
+                await interaction.response.send_message(str(exc), ephemeral=True)
+                return
+            await interaction.response.send_message(f"✅ Ended Trials Season **{season}**. Trials rep has been reset.")
+
+        @self.tree.command(name="leaderboard_total", description="Show the total reputation leaderboard")
+        async def leaderboard_total(interaction: discord.Interaction) -> None:
+            rows = await self.db.get_total_rep_leaderboard(limit=10)
+            if not rows:
+                await interaction.response.send_message("No reputation data yet.", ephemeral=True)
+                return
+            lines = [f"**{idx}.** <@{uid}> — **{rep}**" for idx, (uid, rep) in enumerate(rows, start=1)]
+            embed = discord.Embed(title="🌟 Total Reputation Leaderboard", description="\n".join(lines), color=discord.Color.blurple())
+            await interaction.response.send_message(embed=embed)
+
+        @self.tree.command(name="leaderboard_trials", description="Show current Trials season leaderboard")
+        async def leaderboard_trials(interaction: discord.Interaction) -> None:
+            season = await self.db.get_active_season_number()
+            if season is None:
+                await interaction.response.send_message("No active Trials season right now.", ephemeral=True)
+                return
+            rows = await self.db.get_trial_season_leaderboard(season, limit=10)
+            if not rows:
+                await interaction.response.send_message(f"Season {season} has no Trials rep yet.", ephemeral=True)
+                return
+            lines = [f"**{idx}.** <@{uid}> — **{rep}**" for idx, (uid, rep) in enumerate(rows, start=1)]
+            embed = discord.Embed(title=f"🧪 Trials Leaderboard — Season {season}", description="\n".join(lines), color=discord.Color.green())
+            await interaction.response.send_message(embed=embed)
 
         @self.tree.command(
             name="checkage",
