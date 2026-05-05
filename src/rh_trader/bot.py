@@ -4,12 +4,15 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 
+import aiohttp
+
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 from .config import Settings, load_settings
 from .database import Database, REP_CATEGORIES
+from .metaforge import build_price_embed_chunks, fetch_blueprint_prices
 
 _log = logging.getLogger(__name__)
 REP_COOLDOWN_SECONDS = 30 * 60
@@ -46,6 +49,8 @@ class TraderBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
         self.settings = settings
         self.db = db
+        self._blueprint_message_ids: list[int] = []
+        self.blueprint_price_loop.start()
 
     async def setup_hook(self) -> None:
         await self.db.setup()
@@ -125,6 +130,52 @@ class TraderBot(commands.Bot):
         if member.bot:
             return
         await self._grant_new_account_role_if_needed(member)
+
+    async def post_blueprint_prices(self) -> int:
+        if self.settings.blueprint_channel_id is None:
+            return 0
+        channel = self.get_channel(self.settings.blueprint_channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            return 0
+
+        async with aiohttp.ClientSession() as session:
+            prices = await fetch_blueprint_prices(session)
+
+        embed = discord.Embed(
+            title="🛠️ ARC Raiders Blueprint Median Prices",
+            description="Updated every 24 hours from metaforge.app",
+            color=discord.Color.blue(),
+            timestamp=discord.utils.utcnow(),
+        )
+        chunks = build_price_embed_chunks(prices)
+        if not chunks:
+            embed.add_field(name="No data", value="Could not parse blueprint pricing.", inline=False)
+            chunks = [""]
+
+        sent = 0
+        for idx, chunk in enumerate(chunks, start=1):
+            local = embed.copy()
+            local.add_field(name=f"Blueprints (Page {idx}/{len(chunks)})", value=chunk or "No rows", inline=False)
+            if idx <= len(self._blueprint_message_ids):
+                try:
+                    msg = await channel.fetch_message(self._blueprint_message_ids[idx - 1])
+                    await msg.edit(embed=local)
+                    sent += 1
+                    continue
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    pass
+            msg = await channel.send(embed=local)
+            self._blueprint_message_ids.append(msg.id)
+            sent += 1
+        return sent
+
+    @tasks.loop(hours=24)
+    async def blueprint_price_loop(self) -> None:
+        try:
+            await self.wait_until_ready()
+            await self.post_blueprint_prices()
+        except Exception:
+            _log.exception("Failed to publish blueprint prices")
 
     async def add_core_commands(self) -> None:
         class ScamReportModal(discord.ui.Modal, title="Add Scam Report"):
@@ -453,6 +504,18 @@ class TraderBot(commands.Bot):
                 "✅ Your account is old enough now, so the new-account role has been removed.",
                 ephemeral=True,
             )
+
+        @self.tree.command(name="blueprint_prices", description="Post/update ARC Raiders blueprint median prices")
+        async def blueprint_prices(interaction: discord.Interaction) -> None:
+            if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+                await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+                return
+            if not interaction.user.guild_permissions.manage_guild:
+                await interaction.response.send_message("You need Manage Server permission.", ephemeral=True)
+                return
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            count = await self.post_blueprint_prices()
+            await interaction.followup.send(f"Updated {count} blueprint price message(s).", ephemeral=True)
 
 
 def run_bot() -> None:
