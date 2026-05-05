@@ -14,6 +14,8 @@ class Settings:
     discord_token: str
     database_path: str = "data/trader.db"
     catalog_base_url: str = "https://ardb.app"
+    blueprint_guild_id: int | None = None
+    blueprint_channel_id: int | None = None
 
 
 def load_settings() -> Settings:
@@ -29,6 +31,12 @@ def load_settings() -> Settings:
 
     db_path = os.getenv("TRADER_DB_PATH", "data/trader.db")
     catalog_base_url = os.getenv("CATALOG_BASE_URL", "https://ardb.app")
+    guild_id = os.getenv("BLUEPRINT_GUILD_ID")
+    channel_id = os.getenv("BLUEPRINT_CHANNEL_ID")
     return Settings(
-        discord_token=token, database_path=db_path, catalog_base_url=catalog_base_url
+        discord_token=token,
+        database_path=db_path,
+        catalog_base_url=catalog_base_url,
+        blueprint_guild_id=int(guild_id) if guild_id else None,
+        blueprint_channel_id=int(channel_id) if channel_id else None,
     )
