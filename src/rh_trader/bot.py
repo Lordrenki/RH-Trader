@@ -55,6 +55,7 @@ class TraderBot(commands.Bot):
     async def setup_hook(self) -> None:
         await self.db.setup()
         await self.add_core_commands()
+        self.blueprint_price_loop.start()
         synced = await self.tree.sync()
         _log.info("Synced %s app command(s)", len(synced))
 
@@ -143,7 +144,7 @@ class TraderBot(commands.Bot):
 
         embed = discord.Embed(
             title="🛠️ ARC Raiders Blueprint Median Prices",
-            description="Updated every 24 hours from metaforge.app",
+            description="Updated every 24 hours",
             color=discord.Color.blue(),
             timestamp=discord.utils.utcnow(),
         )
