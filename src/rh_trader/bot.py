@@ -50,13 +50,19 @@ class TraderBot(commands.Bot):
         self.settings = settings
         self.db = db
         self._blueprint_message_ids: list[int] = []
+        self._blueprint_loop_started = False
 
     async def setup_hook(self) -> None:
         await self.db.setup()
         await self.add_core_commands()
-        self.blueprint_price_loop.start()
         synced = await self.tree.sync()
         _log.info("Synced %s app command(s)", len(synced))
+
+    async def on_ready(self) -> None:
+        if not self._blueprint_loop_started:
+            self.blueprint_price_loop.start()
+            self._blueprint_loop_started = True
+        _log.info("Logged in as %s", self.user)
 
     @staticmethod
     def _eligible_rep_role_ids(total_rep: int) -> list[int]:
