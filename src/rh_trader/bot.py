@@ -12,7 +12,7 @@ from discord.ext import commands, tasks
 
 from .config import Settings, load_settings
 from .database import Database, REP_CATEGORIES
-from .raider_market import RaiderMarketItem, fetch_browse_items
+from .metaforge import build_price_embed_chunks, fetch_blueprint_prices
 
 _log = logging.getLogger(__name__)
 REP_COOLDOWN_SECONDS = 30 * 60
@@ -50,6 +50,7 @@ class TraderBot(commands.Bot):
         self.settings = settings
         self.db = db
         self._blueprint_message_ids: list[int] = []
+        self.blueprint_price_loop.start()
 
     async def setup_hook(self) -> None:
         await self.db.setup()
@@ -139,25 +140,15 @@ class TraderBot(commands.Bot):
             return 0
 
         async with aiohttp.ClientSession() as session:
-            items = await fetch_browse_items(session)
-
-        blueprints = [
-            item for item in items.values()
-            if "blueprint" in item.name.lower() and isinstance(item.trade_value, int) and item.trade_value > 0
-        ]
-        blueprints.sort(key=lambda item: item.trade_value or 0, reverse=True)
+            prices = await fetch_blueprint_prices(session)
 
         embed = discord.Embed(
-            title="🛠️ ARC Raiders Blueprint Trade Values",
-            description="Updated every 24 hours from raidermarket.com",
+            title="🛠️ ARC Raiders Blueprint Median Prices",
+            description="Updated every 24 hours",
             color=discord.Color.blue(),
             timestamp=discord.utils.utcnow(),
         )
-        lines = [
-            f"`{idx:>2}.` **[{item.name}]({item.url})** — Trade Value: **{item.trade_value:,}**"
-            for idx, item in enumerate(blueprints, start=1)
-        ]
-        chunks = ["\n".join(lines[i:i + 25]) for i in range(0, len(lines), 25)]
+        chunks = build_price_embed_chunks(prices)
         if not chunks:
             embed.add_field(name="No data", value="Could not parse blueprint pricing.", inline=False)
             chunks = [""]
