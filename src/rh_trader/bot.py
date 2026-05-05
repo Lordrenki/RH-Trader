@@ -12,7 +12,7 @@ from discord.ext import commands, tasks
 
 from .config import Settings, load_settings
 from .database import Database, REP_CATEGORIES
-from .metaforge import build_price_embed_chunks, fetch_blueprint_prices
+from .raider_market import fetch_browse_items, format_trade_value_lines
 
 _log = logging.getLogger(__name__)
 REP_COOLDOWN_SECONDS = 30 * 60
@@ -50,7 +50,6 @@ class TraderBot(commands.Bot):
         self.settings = settings
         self.db = db
         self._blueprint_message_ids: list[int] = []
-        self.blueprint_price_loop.start()
 
     async def setup_hook(self) -> None:
         await self.db.setup()
@@ -140,17 +139,32 @@ class TraderBot(commands.Bot):
             return 0
 
         async with aiohttp.ClientSession() as session:
-            prices = await fetch_blueprint_prices(session)
+            items = await fetch_browse_items(session)
+
+        blueprint_items = [
+            item for item in items.values() if "blueprint" in item.name.lower()
+        ]
+        lines = format_trade_value_lines(blueprint_items, include_game_value=False)
 
         embed = discord.Embed(
-            title="🛠️ ARC Raiders Blueprint Median Prices",
+            title="🛠️ ARC Raiders Blueprint Trade Values",
             description="Updated every 24 hours",
             color=discord.Color.blue(),
             timestamp=discord.utils.utcnow(),
         )
-        chunks = build_price_embed_chunks(prices)
+        chunks: list[str] = []
+        page = ""
+        for line in lines:
+            candidate = f"{page}\n{line}".strip()
+            if len(candidate) > 900 and page:
+                chunks.append(page)
+                page = line
+            else:
+                page = candidate
+        if page:
+            chunks.append(page)
         if not chunks:
-            embed.add_field(name="No data", value="Could not parse blueprint pricing.", inline=False)
+            embed.add_field(name="No data", value="Could not parse blueprint trade values.", inline=False)
             chunks = [""]
 
         sent = 0
