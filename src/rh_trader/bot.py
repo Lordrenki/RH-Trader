@@ -11,6 +11,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from .config import Settings, load_settings
+from .blueprint_cache import load_blueprint_values, save_blueprint_values
 from .database import Database, REP_CATEGORIES
 from .raider_market import fetch_browse_items, format_trade_value_lines
 
@@ -144,12 +145,20 @@ class TraderBot(commands.Bot):
         if not isinstance(channel, discord.TextChannel):
             return 0
 
-        async with aiohttp.ClientSession() as session:
-            items = await fetch_browse_items(session)
+        try:
+            async with aiohttp.ClientSession() as session:
+                items = await fetch_browse_items(session)
+            blueprint_items = [
+                item for item in items.values() if "blueprint" in item.name.lower()
+            ]
+        except Exception:
+            _log.exception("Failed to fetch live blueprint values; falling back to cache")
+            blueprint_items = []
 
-        blueprint_items = [
-            item for item in items.values() if "blueprint" in item.name.lower()
-        ]
+        if blueprint_items:
+            save_blueprint_values(blueprint_items)
+        else:
+            blueprint_items = load_blueprint_values()
         lines = format_trade_value_lines(blueprint_items, include_game_value=False)
 
         embed = discord.Embed(
