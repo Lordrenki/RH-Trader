@@ -86,3 +86,61 @@ def test_parse_browse_items_from_next_flight_payload() -> None:
 
     assert items["burletta_blueprint"].trade_value == 200000
     assert items["burletta_blueprint"].game_value == 5000
+
+
+def test_parse_homepage_high_value_blueprint_cards() -> None:
+    html = (
+        "<html><body>"
+        '<a href="/item/hullcracker_blueprint">'
+        "Common 110× Hullcracker Blueprint Blueprint "
+        "Game Value 5,000 Market Value 550,000 View Details"
+        "</a>"
+        '<a href="/item/looting_mk_3_safekeeper_blueprint">'
+        "Common 60× Looting Mk. 3 (Safekeeper) Blueprint Blueprint "
+        "Game Value 5,000 Market Value 300,000 View Details"
+        "</a>"
+        "</body></html>"
+    )
+
+    items = parse_browse_items(html)
+
+    assert items["hullcracker_blueprint"].name == "Hullcracker Blueprint"
+    assert items["hullcracker_blueprint"].trade_value == 550000
+    assert items["hullcracker_blueprint"].game_value == 5000
+    assert items["looting_mk_3_safekeeper_blueprint"].name == "Looting Mk. 3 (Safekeeper) Blueprint"
+    assert items["looting_mk_3_safekeeper_blueprint"].trade_value == 300000
+
+
+async def test_fetch_browse_items_falls_back_when_browse_items_have_no_prices(monkeypatch) -> None:
+    from rh_trader import raider_market
+    from rh_trader.raider_market import BROWSE_URL, HOME_URL, RaiderMarketItem, fetch_browse_items
+
+    async def fake_fetch(session, url: str, *, timeout: float):
+        if url == BROWSE_URL:
+            return {
+                "hullcracker_blueprint": RaiderMarketItem(
+                    slug="hullcracker_blueprint",
+                    name="Hullcracker Blueprint",
+                    trade_value=None,
+                    game_value=None,
+                    url="https://raidermarket.com/item/hullcracker_blueprint",
+                )
+            }
+        if url == HOME_URL:
+            return {
+                "hullcracker_blueprint": RaiderMarketItem(
+                    slug="hullcracker_blueprint",
+                    name="Hullcracker Blueprint",
+                    trade_value=550000,
+                    game_value=5000,
+                    url="https://raidermarket.com/item/hullcracker_blueprint",
+                )
+            }
+        raise AssertionError(url)
+
+    monkeypatch.setattr(raider_market, "_fetch_items_from_url", fake_fetch)
+
+    items = await fetch_browse_items(object())
+
+    assert items["hullcracker_blueprint"].trade_value == 550000
+    assert items["hullcracker_blueprint"].game_value == 5000

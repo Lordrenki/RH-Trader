@@ -304,17 +304,45 @@ async def _fetch_items_from_url(
     return parse_browse_items(html)
 
 
+def _has_trade_values(items: Iterable[RaiderMarketItem]) -> bool:
+    return any(isinstance(item.trade_value, int) and item.trade_value > 0 for item in items)
+
+
+def _merge_item_sources(
+    primary: dict[str, RaiderMarketItem], secondary: dict[str, RaiderMarketItem]
+) -> dict[str, RaiderMarketItem]:
+    merged = dict(primary)
+    for slug, fallback in secondary.items():
+        current = merged.get(slug)
+        if current is None:
+            merged[slug] = fallback
+            continue
+        if (
+            (not isinstance(current.trade_value, int) or current.trade_value <= 0)
+            and isinstance(fallback.trade_value, int)
+            and fallback.trade_value > 0
+        ):
+            merged[slug] = fallback
+    return merged
+
+
 async def fetch_browse_items(
     session: aiohttp.ClientSession, *, timeout: float = 25.0
 ) -> dict[str, RaiderMarketItem]:
-    items = await _fetch_items_from_url(session, BROWSE_URL, timeout=timeout)
-    if items:
-        return items
+    browse_items = await _fetch_items_from_url(session, BROWSE_URL, timeout=timeout)
+    if _has_trade_values(browse_items.values()):
+        return browse_items
 
-    # The browse page can be client-rendered while the home page still exposes the
-    # high-value cards in static markup. Falling back keeps the Discord post useful
-    # instead of publishing an empty embed.
-    return await _fetch_items_from_url(session, HOME_URL, timeout=timeout)
+    # The browse page can be client-rendered or can expose item records before the
+    # pricing payload is hydrated. In that state we may still parse hundreds of
+    # slugs/names, but none of them can render in Discord because they have no
+    # trade values. The home page usually includes priced high-value cards in
+    # static markup, so merge it in instead of treating unpriced browse records as
+    # success and publishing an empty embed.
+    home_items = await _fetch_items_from_url(session, HOME_URL, timeout=timeout)
+    if not browse_items:
+        return home_items
+    return _merge_item_sources(browse_items, home_items)
 
 
 def format_trade_value_lines(

@@ -155,8 +155,14 @@ class TraderBot(commands.Bot):
             _log.exception("Failed to fetch live blueprint values; falling back to cache")
             blueprint_items = []
 
-        if blueprint_items:
-            save_blueprint_values(blueprint_items)
+        priced_blueprint_items = [
+            item
+            for item in blueprint_items
+            if isinstance(item.trade_value, int) and item.trade_value > 0
+        ]
+        if priced_blueprint_items:
+            save_blueprint_values(priced_blueprint_items)
+            blueprint_items = priced_blueprint_items
         else:
             blueprint_items = load_blueprint_values()
         lines = format_trade_value_lines(blueprint_items, include_game_value=False)
