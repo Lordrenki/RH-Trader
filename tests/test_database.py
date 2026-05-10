@@ -1,8 +1,9 @@
 from pathlib import Path
+import sqlite3
 
 import pytest
 
-from rh_trader.database import Database
+from rh_trader.database import Database, REP_CATEGORIES
 
 pytestmark = pytest.mark.asyncio
 
@@ -11,6 +12,59 @@ async def init_db(tmp_path: Path) -> Database:
     db = Database(tmp_path / "test.db")
     await db.setup()
     return db
+
+
+async def test_reputation_categories_are_trading_trials_and_porter(tmp_path: Path):
+    db = await init_db(tmp_path)
+
+    assert REP_CATEGORIES == ("trading", "trials", "porter")
+
+    await db.add_reputation(1, 2, "trading")
+    await db.add_reputation(3, 2, "trials")
+    await db.add_reputation(4, 2, "porter")
+
+    profile = await db.get_profile(2)
+    assert profile.trading == 1
+    assert profile.trials == 1
+    assert profile.porter == 1
+    assert profile.total == 3
+
+    with pytest.raises(ValueError):
+        await db.add_reputation(5, 2, "knowledge")
+    with pytest.raises(ValueError):
+        await db.add_reputation(5, 2, "skill")
+
+
+async def test_legacy_skill_rep_migrates_to_porter_and_knowledge_is_not_totaled(tmp_path: Path):
+    db_path = tmp_path / "legacy.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE rep_totals (
+                user_id INTEGER PRIMARY KEY,
+                trading INTEGER NOT NULL DEFAULT 0,
+                knowledge INTEGER NOT NULL DEFAULT 0,
+                skill INTEGER NOT NULL DEFAULT 0,
+                trials INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO rep_totals(user_id, trading, knowledge, skill, trials) VALUES (?, ?, ?, ?, ?)",
+            (10, 2, 99, 4, 3),
+        )
+
+    db = Database(db_path)
+    await db.setup()
+
+    profile = await db.get_profile(10)
+    assert profile.trading == 2
+    assert profile.porter == 4
+    assert profile.trials == 3
+    assert profile.total == 9
+
+    leaderboard = await db.get_total_rep_leaderboard()
+    assert leaderboard == [(10, 9)]
 
 
 async def test_stock_crud(tmp_path: Path):

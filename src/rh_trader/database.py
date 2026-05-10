@@ -7,20 +7,19 @@ from dataclasses import dataclass
 
 import aiosqlite
 
-REP_CATEGORIES = ("trading", "knowledge", "skill", "trials")
+REP_CATEGORIES = ("trading", "trials", "porter")
 
 
 @dataclass(slots=True)
 class Profile:
     user_id: int
     trading: int
-    knowledge: int
-    skill: int
+    porter: int
     trials: int
 
     @property
     def total(self) -> int:
-        return self.trading + self.knowledge + self.skill + self.trials
+        return self.trading + self.porter + self.trials
 
 
 class Database:
@@ -42,8 +41,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS rep_totals (
                     user_id INTEGER PRIMARY KEY,
                     trading INTEGER NOT NULL DEFAULT 0,
-                    knowledge INTEGER NOT NULL DEFAULT 0,
-                    skill INTEGER NOT NULL DEFAULT 0,
+                    porter INTEGER NOT NULL DEFAULT 0,
                     trials INTEGER NOT NULL DEFAULT 0
                 );
 
@@ -73,17 +71,36 @@ class Database:
                 );
                 """
             )
+            await self._ensure_rep_columns(db)
+            await self._migrate_legacy_skill_to_porter(db)
             await self._migrate_legacy_rep_to_trading(db)
-            await self._ensure_trials_column(db)
             await self._ensure_seasons_tables(db)
             await db.commit()
 
 
-    async def _ensure_trials_column(self, db: aiosqlite.Connection) -> None:
+    async def _ensure_rep_columns(self, db: aiosqlite.Connection) -> None:
         cursor = await db.execute("PRAGMA table_info(rep_totals)")
         columns = {str(row[1]).lower() for row in await cursor.fetchall()}
+        if "porter" not in columns:
+            await db.execute("ALTER TABLE rep_totals ADD COLUMN porter INTEGER NOT NULL DEFAULT 0")
         if "trials" not in columns:
             await db.execute("ALTER TABLE rep_totals ADD COLUMN trials INTEGER NOT NULL DEFAULT 0")
+
+    async def _migrate_legacy_skill_to_porter(self, db: aiosqlite.Connection) -> None:
+        cursor = await db.execute(
+            "SELECT value FROM migration_state WHERE key = 'legacy_skill_to_porter_v1'"
+        )
+        if await cursor.fetchone():
+            return
+
+        table_info = await db.execute("PRAGMA table_info(rep_totals)")
+        columns = {str(row[1]).lower() for row in await table_info.fetchall()}
+        if "skill" in columns:
+            await db.execute("UPDATE rep_totals SET porter = MAX(porter, skill)")
+
+        await db.execute(
+            "INSERT OR REPLACE INTO migration_state(key, value) VALUES ('legacy_skill_to_porter_v1', 'done')"
+        )
 
     async def _ensure_seasons_tables(self, db: aiosqlite.Connection) -> None:
         await db.executescript(
@@ -126,8 +143,8 @@ class Database:
         for user_id, rep_positive in rows:
             await db.execute(
                 """
-                INSERT INTO rep_totals(user_id, trading, knowledge, skill, trials)
-                VALUES (?, ?, 0, 0, 0)
+                INSERT INTO rep_totals(user_id, trading, porter, trials)
+                VALUES (?, ?, 0, 0)
                 ON CONFLICT(user_id) DO UPDATE SET
                     trading = MAX(rep_totals.trading, excluded.trading)
                 """,
@@ -176,8 +193,8 @@ class Database:
             )
             await db.execute(
                 """
-                INSERT INTO rep_totals(user_id, trading, knowledge, skill, trials)
-                VALUES (?, 0, 0, 0, 0)
+                INSERT INTO rep_totals(user_id, trading, porter, trials)
+                VALUES (?, 0, 0, 0)
                 ON CONFLICT(user_id) DO NOTHING
                 """,
                 (target_id,),
@@ -203,7 +220,7 @@ class Database:
         async with self._connect() as db:
             cursor = await db.execute(
                 """
-                SELECT user_id, trading, knowledge, skill, trials
+                SELECT user_id, trading, porter, trials
                 FROM rep_totals
                 WHERE user_id = ?
                 """,
@@ -212,9 +229,9 @@ class Database:
             row = await cursor.fetchone()
 
         if row is None:
-            return Profile(user_id=user_id, trading=0, knowledge=0, skill=0, trials=0)
+            return Profile(user_id=user_id, trading=0, porter=0, trials=0)
 
-        return Profile(user_id=int(row[0]), trading=int(row[1]), knowledge=int(row[2]), skill=int(row[3]), trials=int(row[4]))
+        return Profile(user_id=int(row[0]), trading=int(row[1]), porter=int(row[2]), trials=int(row[3]))
 
     @staticmethod
     def normalize_embark_id(embark_id: str) -> str:
@@ -313,7 +330,7 @@ class Database:
         async with self._connect() as db:
             cursor = await db.execute(
                 """
-                SELECT user_id, (trading + knowledge + skill + trials) AS total
+                SELECT user_id, (trading + porter + trials) AS total
                 FROM rep_totals
                 WHERE total > 0
                 ORDER BY total DESC, user_id ASC
