@@ -16,7 +16,7 @@ from .database import Database, REP_CATEGORIES
 from .raider_market import fetch_browse_items, format_trade_value_lines
 
 _log = logging.getLogger(__name__)
-REP_COOLDOWN_SECONDS = 30 * 60
+REP_COOLDOWN_SECONDS = 3 * 60 * 60
 SCAM_COMMAND_ROLE_ID = 1367584510656385045
 TRADE_REP_ROLE_THRESHOLDS = (
     (10, 1495238466731249665),
@@ -41,6 +41,94 @@ def _format_duration(seconds: int) -> str:
     if minutes:
         return f"{minutes}m {secs}s"
     return f"{secs}s"
+
+
+def _rep_category_label(category: str) -> str:
+    return "Porter" if category == "porter" else category.capitalize()
+
+
+class RepCategoryView(discord.ui.View):
+    def __init__(self, bot: "TraderBot", target: discord.Member, requested_by_id: int) -> None:
+        super().__init__(timeout=180)
+        self.bot = bot
+        self.target = target
+        self.requested_by_id = requested_by_id
+
+        for category in REP_CATEGORIES:
+            button = discord.ui.Button(
+                label=_rep_category_label(category),
+                style=discord.ButtonStyle.primary,
+                custom_id=f"rep_category:{category}",
+            )
+
+            async def callback(
+                interaction: discord.Interaction,
+                selected_category: str = category,
+            ) -> None:
+                await self._award_reputation(interaction, selected_category)
+
+            button.callback = callback
+            self.add_item(button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.requested_by_id:
+            return True
+
+        await interaction.response.send_message(
+            "Only the person who used `/rep` can choose this rep category.",
+            ephemeral=True,
+        )
+        return False
+
+    def _disable_buttons(self) -> None:
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+
+    async def _award_reputation(
+        self,
+        interaction: discord.Interaction,
+        category: str,
+    ) -> None:
+        remaining = await self.bot.db.get_pair_cooldown_remaining(
+            interaction.user.id,
+            self.target.id,
+            REP_COOLDOWN_SECONDS,
+        )
+        if remaining > 0:
+            self._disable_buttons()
+            await interaction.response.edit_message(
+                content=(
+                    f"You recently repped {self.target.mention}. "
+                    f"Try again in `{_format_duration(remaining)}`."
+                ),
+                view=self,
+            )
+            return
+
+        await self.bot.db.add_reputation(interaction.user.id, self.target.id, category)
+        self._disable_buttons()
+        await interaction.response.edit_message(
+            content=(
+                f"✅ Added +1 **{_rep_category_label(category)}** reputation "
+                f"to {self.target.mention}."
+            ),
+            view=self,
+        )
+
+        profile = await self.bot.db.get_profile(self.target.id)
+        roles_added = await self.bot._sync_rep_roles_for_member(
+            self.target,
+            profile.total,
+            profile.trials,
+        )
+        if roles_added and interaction.channel is not None:
+            await self.bot._send_rep_role_award_message(
+                interaction.channel,
+                self.target,
+                roles_added,
+                profile.total,
+            )
 
 
 class TraderBot(commands.Bot):
@@ -297,17 +385,11 @@ class TraderBot(commands.Bot):
 
             await interaction.response.send_message(f"Thread created: {thread.mention}", ephemeral=True)
 
-        rep_category_choices = [
-            app_commands.Choice(name=name.capitalize(), value=name) for name in REP_CATEGORIES
-        ]
-
         @self.tree.command(name="rep", description="Give positive reputation in one category")
-        @app_commands.describe(user="Member receiving reputation", category="Rep category")
-        @app_commands.choices(category=rep_category_choices)
+        @app_commands.describe(user="Member receiving reputation")
         async def rep(
             interaction: discord.Interaction,
             user: discord.Member,
-            category: app_commands.Choice[str],
         ) -> None:
             if user.id == interaction.user.id:
                 await interaction.response.send_message("You can't rep yourself.", ephemeral=True)
@@ -331,14 +413,11 @@ class TraderBot(commands.Bot):
                 )
                 return
 
-            await self.db.add_reputation(interaction.user.id, user.id, category.value)
             await interaction.response.send_message(
-                f"✅ Added +1 **{category.name}** reputation to {user.mention}."
+                f"Choose a reputation category for {user.mention}.",
+                view=RepCategoryView(self, user, interaction.user.id),
+                ephemeral=True,
             )
-            profile = await self.db.get_profile(user.id)
-            roles_added = await self._sync_rep_roles_for_member(user, profile.total, profile.trials)
-            if roles_added and interaction.channel is not None:
-                await self._send_rep_role_award_message(interaction.channel, user, roles_added, profile.total)
 
         @self.tree.command(name="profile", description="View rep profile")
         async def profile(interaction: discord.Interaction, user: discord.Member | None = None) -> None:
@@ -349,8 +428,7 @@ class TraderBot(commands.Bot):
                 color=discord.Color.gold(),
             )
             embed.add_field(name="Trading", value=str(p.trading), inline=True)
-            embed.add_field(name="Knowledge", value=str(p.knowledge), inline=True)
-            embed.add_field(name="Skill", value=str(p.skill), inline=True)
+            embed.add_field(name="Porter", value=str(p.porter), inline=True)
             embed.add_field(name="Trials", value=str(p.trials), inline=True)
             embed.add_field(name="Overall", value=f"**{p.total}**", inline=False)
             await interaction.response.send_message(embed=embed)
