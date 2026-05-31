@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import os
 import time
+from os import PathLike
 from dataclasses import dataclass
 
 import aiosqlite
 
-REP_CATEGORIES = ("trading", "trials", "porter")
+REP_CATEGORIES = ("trading",)
 
 
 @dataclass(slots=True)
@@ -19,15 +20,15 @@ class Profile:
 
     @property
     def total(self) -> int:
-        return self.trading + self.porter + self.trials
+        return self.trading
 
 
 class Database:
     """Minimal data access layer used by the slimmed down bot."""
 
-    def __init__(self, path: str) -> None:
-        self.path = path
-        directory = os.path.dirname(path)
+    def __init__(self, path: str | PathLike[str]) -> None:
+        self.path = os.fspath(path)
+        directory = os.path.dirname(self.path)
         if directory:
             os.makedirs(directory, exist_ok=True)
 
@@ -74,6 +75,7 @@ class Database:
             await self._ensure_rep_columns(db)
             await self._migrate_legacy_skill_to_porter(db)
             await self._migrate_legacy_rep_to_trading(db)
+            await self._migrate_non_trading_rep_to_trading(db)
             await self._ensure_seasons_tables(db)
             await db.commit()
 
@@ -100,6 +102,25 @@ class Database:
 
         await db.execute(
             "INSERT OR REPLACE INTO migration_state(key, value) VALUES ('legacy_skill_to_porter_v1', 'done')"
+        )
+
+    async def _migrate_non_trading_rep_to_trading(self, db: aiosqlite.Connection) -> None:
+        cursor = await db.execute(
+            "SELECT value FROM migration_state WHERE key = 'non_trading_rep_to_trading_v1'"
+        )
+        if await cursor.fetchone():
+            return
+
+        await db.execute(
+            """
+            UPDATE rep_totals
+            SET trading = trading + COALESCE(porter, 0) + COALESCE(trials, 0),
+                porter = 0,
+                trials = 0
+            """
+        )
+        await db.execute(
+            "INSERT OR REPLACE INTO migration_state(key, value) VALUES ('non_trading_rep_to_trading_v1', 'done')"
         )
 
     async def _ensure_seasons_tables(self, db: aiosqlite.Connection) -> None:
@@ -178,7 +199,7 @@ class Database:
         remaining = cooldown_seconds - elapsed
         return max(0, remaining)
 
-    async def add_reputation(self, rater_id: int, target_id: int, category: str) -> None:
+    async def add_reputation(self, rater_id: int, target_id: int, category: str = "trading") -> None:
         normalized = category.lower().strip()
         if normalized not in REP_CATEGORIES:
             raise ValueError(f"Invalid category: {category}")
@@ -203,17 +224,6 @@ class Database:
                 f"UPDATE rep_totals SET {normalized} = {normalized} + 1 WHERE user_id = ?",
                 (target_id,),
             )
-            if normalized == "trials":
-                season = await self._get_active_season_number_db(db)
-                if season is not None:
-                    await db.execute(
-                        """
-                        INSERT INTO trial_season_rep(season_number, user_id, rep)
-                        VALUES (?, ?, 1)
-                        ON CONFLICT(season_number, user_id) DO UPDATE SET rep = rep + 1
-                        """,
-                        (season, target_id),
-                    )
             await db.commit()
 
     async def get_profile(self, user_id: int) -> Profile:
@@ -231,7 +241,7 @@ class Database:
         if row is None:
             return Profile(user_id=user_id, trading=0, porter=0, trials=0)
 
-        return Profile(user_id=int(row[0]), trading=int(row[1]), porter=int(row[2]), trials=int(row[3]))
+        return Profile(user_id=int(row[0]), trading=int(row[1]), porter=0, trials=0)
 
     @staticmethod
     def normalize_embark_id(embark_id: str) -> str:
@@ -330,10 +340,10 @@ class Database:
         async with self._connect() as db:
             cursor = await db.execute(
                 """
-                SELECT user_id, (trading + porter + trials) AS total
+                SELECT user_id, trading
                 FROM rep_totals
-                WHERE total > 0
-                ORDER BY total DESC, user_id ASC
+                WHERE trading > 0
+                ORDER BY trading DESC, user_id ASC
                 LIMIT ?
                 """,
                 (limit,),
