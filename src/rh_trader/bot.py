@@ -2,35 +2,27 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import timedelta
 
 import aiohttp
 
 import discord
-from discord import app_commands
 from discord.ext import commands, tasks
 
 from .config import Settings, load_settings
 from .blueprint_cache import load_blueprint_values, save_blueprint_values
-from .database import Database, REP_CATEGORIES
+from .database import Database
 from .raider_market import fetch_browse_items, format_trade_value_lines
 
 _log = logging.getLogger(__name__)
 REP_COOLDOWN_SECONDS = 3 * 60 * 60
-SCAM_COMMAND_ROLE_ID = 1367584510656385045
 TRADE_REP_ROLE_THRESHOLDS = (
     (10, 1495238466731249665),
     (25, 1495238526621716681),
     (50, 1495238582762344518),
     (100, 1495238632825683968),
 )
-TRIALS_REP_ROLE_THRESHOLDS = (
-    (5, 1500304686425833472),
-    (15, 1500304729375375491),
-    (25, 1500304767145083032),
-    (50, 1500304808425296103),
-)
-SEASON_MANAGER_ROLE_ID = 927355923364720651
 NEW_ACCOUNT_ROLE_ID = 1497024245211988028
 NEW_ACCOUNT_AGE_DAYS = 30
 
@@ -43,98 +35,28 @@ def _format_duration(seconds: int) -> str:
     return f"{secs}s"
 
 
-def _rep_category_label(category: str) -> str:
-    return "Porter" if category == "porter" else category.capitalize()
+_REP_COMMAND_RE = re.compile(r"^\+rep[ \t]+<@!?(\d+)>(?=\s|$)")
+_REP_CHECK_RE = re.compile(r"^rep[ \t]+<@!?(\d+)>(?=\s|$)")
 
 
-class RepCategoryView(discord.ui.View):
-    def __init__(self, bot: "TraderBot", target: discord.Member, requested_by_id: int) -> None:
-        super().__init__(timeout=180)
-        self.bot = bot
-        self.target = target
-        self.requested_by_id = requested_by_id
+def _extract_explicit_rep_target(content: str) -> tuple[str, int] | None:
+    """Parse the legacy text reputation commands from a message body."""
+    add_match = _REP_COMMAND_RE.match(content.strip())
+    if add_match:
+        return "+", int(add_match.group(1))
 
-        for category in REP_CATEGORIES:
-            button = discord.ui.Button(
-                label=_rep_category_label(category),
-                style=discord.ButtonStyle.primary,
-                custom_id=f"rep_category:{category}",
-            )
+    check_match = _REP_CHECK_RE.match(content.strip())
+    if check_match:
+        return "check", int(check_match.group(1))
 
-            async def callback(
-                interaction: discord.Interaction,
-                selected_category: str = category,
-            ) -> None:
-                await self._award_reputation(interaction, selected_category)
-
-            button.callback = callback
-            self.add_item(button)
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id == self.requested_by_id:
-            return True
-
-        await interaction.response.send_message(
-            "Only the person who used `/rep` can choose this rep category.",
-            ephemeral=True,
-        )
-        return False
-
-    def _disable_buttons(self) -> None:
-        for child in self.children:
-            if isinstance(child, discord.ui.Button):
-                child.disabled = True
-
-    async def _award_reputation(
-        self,
-        interaction: discord.Interaction,
-        category: str,
-    ) -> None:
-        remaining = await self.bot.db.get_pair_cooldown_remaining(
-            interaction.user.id,
-            self.target.id,
-            REP_COOLDOWN_SECONDS,
-        )
-        if remaining > 0:
-            self._disable_buttons()
-            await interaction.response.edit_message(
-                content=(
-                    f"You recently repped {self.target.mention}. "
-                    f"Try again in `{_format_duration(remaining)}`."
-                ),
-                view=self,
-            )
-            return
-
-        await self.bot.db.add_reputation(interaction.user.id, self.target.id, category)
-        self._disable_buttons()
-        await interaction.response.edit_message(
-            content=(
-                f"✅ Added +1 **{_rep_category_label(category)}** reputation "
-                f"to {self.target.mention}."
-            ),
-            view=self,
-        )
-
-        profile = await self.bot.db.get_profile(self.target.id)
-        roles_added = await self.bot._sync_rep_roles_for_member(
-            self.target,
-            profile.total,
-            profile.trials,
-        )
-        if roles_added and interaction.channel is not None:
-            await self.bot._send_rep_role_award_message(
-                interaction.channel,
-                self.target,
-                roles_added,
-                profile.total,
-            )
+    return None
 
 
 class TraderBot(commands.Bot):
     def __init__(self, settings: Settings, db: Database) -> None:
         intents = discord.Intents.default()
         intents.members = True
+        intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
         self.settings = settings
         self.db = db
@@ -143,9 +65,9 @@ class TraderBot(commands.Bot):
 
     async def setup_hook(self) -> None:
         await self.db.setup()
-        await self.add_core_commands()
+        self.tree.clear_commands(guild=None)
         synced = await self.tree.sync()
-        _log.info("Synced %s app command(s)", len(synced))
+        _log.info("Cleared slash commands; %s app command(s) remain synced", len(synced))
 
     async def on_ready(self) -> None:
         if not self._blueprint_loop_started:
@@ -163,7 +85,7 @@ class TraderBot(commands.Bot):
         total_rep: int,
         trials_rep: int,
     ) -> list[discord.Role]:
-        role_ids = self._eligible_rep_role_ids(total_rep) + [role_id for threshold, role_id in TRIALS_REP_ROLE_THRESHOLDS if trials_rep >= threshold]
+        role_ids = self._eligible_rep_role_ids(total_rep)
         if not role_ids:
             return []
 
@@ -177,7 +99,7 @@ class TraderBot(commands.Bot):
             return []
 
         try:
-            await member.add_roles(*roles_to_add, reason=f"Reached {total_rep} total positive trade rep")
+            await member.add_roles(*roles_to_add, reason=f"Reached {total_rep} trading rep")
         except (discord.Forbidden, discord.HTTPException):
             _log.exception("Failed to add rep roles to member %s", member.id)
             return []
@@ -195,7 +117,7 @@ class TraderBot(commands.Bot):
             await channel.send(
                 (
                     f"🎉 {member.mention} unlocked {role_names} "
-                    f"for reaching **{total_rep}** positive trade rep!"
+                    f"for reaching **{total_rep}** trading rep!"
                 ),
                 allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
             )
@@ -225,6 +147,89 @@ class TraderBot(commands.Bot):
         if member.bot:
             return
         await self._grant_new_account_role_if_needed(member)
+
+    async def on_message(self, message: discord.Message) -> None:
+        if message.author.bot or message.guild is None:
+            return
+
+        parsed = _extract_explicit_rep_target(message.content)
+        if parsed is None:
+            return
+
+        action, target_id = parsed
+        target = next((member for member in message.mentions if member.id == target_id), None)
+        if target is None:
+            await message.reply("Please mention a server member directly.", mention_author=False)
+            return
+
+        if action == "check":
+            await self._reply_with_rep_profile(message, target)
+            return
+
+        if not isinstance(message.author, discord.Member):
+            await message.reply("Reputation can only be given inside a server.", mention_author=False)
+            return
+
+        await self._award_trading_rep_from_message(message, message.author, target)
+
+    async def _award_trading_rep_from_message(
+        self,
+        message: discord.Message,
+        rater: discord.Member,
+        target: discord.Member,
+    ) -> None:
+        if target.id == rater.id:
+            await message.reply("You can't rep yourself.", mention_author=False)
+            return
+        if target.bot:
+            await message.reply("You can't rep a bot account.", mention_author=False)
+            return
+
+        remaining = await self.db.get_pair_cooldown_remaining(
+            rater.id,
+            target.id,
+            REP_COOLDOWN_SECONDS,
+        )
+        if remaining > 0:
+            await message.reply(
+                (
+                    f"You recently repped {target.mention}. "
+                    f"Try again in `{_format_duration(remaining)}`."
+                ),
+                mention_author=False,
+            )
+            return
+
+        await self.db.add_reputation(rater.id, target.id, "trading")
+        profile = await self.db.get_profile(target.id)
+        await message.reply(
+            f"✅ Added +1 trading rep to {target.mention}. They now have **{profile.total}** trading rep.",
+            mention_author=False,
+            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False, replied_user=False),
+        )
+
+        roles_added = await self._sync_rep_roles_for_member(target, profile.total, 0)
+        if roles_added:
+            await self._send_rep_role_award_message(
+                message.channel,
+                target,
+                roles_added,
+                profile.total,
+            )
+
+    async def _reply_with_rep_profile(self, message: discord.Message, target: discord.Member) -> None:
+        profile = await self.db.get_profile(target.id)
+        embed = discord.Embed(
+            title=f"🏆 {target.display_name}'s Trading Rep",
+            description=f"{target.mention} has **{profile.total}** trading rep.",
+            color=discord.Color.gold(),
+        )
+        embed.add_field(name="Trading", value=str(profile.trading), inline=True)
+        await message.reply(
+            embed=embed,
+            mention_author=False,
+            allowed_mentions=discord.AllowedMentions(users=False, roles=False, everyone=False, replied_user=False),
+        )
 
     async def post_blueprint_prices(self) -> int:
         if self.settings.blueprint_channel_id is None:
@@ -300,336 +305,6 @@ class TraderBot(commands.Bot):
             await self.post_blueprint_prices()
         except Exception:
             _log.exception("Failed to publish blueprint prices")
-
-    async def add_core_commands(self) -> None:
-        class ScamReportModal(discord.ui.Modal, title="Add Scam Report"):
-            embark_id = discord.ui.TextInput(
-                label="Embark ID",
-                placeholder="User#1234",
-                required=True,
-                max_length=64,
-            )
-
-            def __init__(
-                self,
-                bot: TraderBot,
-                reported_user: discord.Member,
-                requested_by: discord.abc.User,
-            ) -> None:
-                super().__init__()
-                self.bot = bot
-                self.reported_user = reported_user
-                self.requested_by = requested_by
-
-            async def on_submit(self, interaction: discord.Interaction) -> None:
-                embark_id_value = str(self.embark_id.value).strip()
-                if "#" not in embark_id_value or len(embark_id_value.split("#", 1)[0]) == 0:
-                    await interaction.response.send_message(
-                        "Please provide a valid Embark ID in the format `User#1234`.",
-                        ephemeral=True,
-                    )
-                    return
-
-                inserted, normalized = await self.bot.db.add_scam_report(
-                    discord_user_id=self.reported_user.id,
-                    embark_id=embark_id_value,
-                    added_by_discord_user_id=self.requested_by.id,
-                )
-                if inserted:
-                    await interaction.response.send_message(
-                        (
-                            f"🚨 Added **{self.reported_user.mention}** to the scam database "
-                            f"with Embark ID `{embark_id_value}`."
-                        ),
-                        ephemeral=True,
-                    )
-                    return
-
-                await interaction.response.send_message(
-                    f"That Embark ID is already in the scam database as `{normalized}`.",
-                    ephemeral=True,
-                )
-
-        @self.tree.command(name="trade", description="Create a trade thread with another member")
-        async def trade(interaction: discord.Interaction, user: discord.Member) -> None:
-            if interaction.guild is None:
-                await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
-                return
-
-            if user.bot:
-                await interaction.response.send_message("You can't start a trade thread with a bot.", ephemeral=True)
-                return
-
-            if user.id == interaction.user.id:
-                await interaction.response.send_message("You can't start a trade thread with yourself.", ephemeral=True)
-                return
-
-            channel = interaction.channel
-            if not isinstance(channel, (discord.TextChannel, discord.ForumChannel)):
-                await interaction.response.send_message(
-                    "Use `/trade @user` inside a server text channel.",
-                    ephemeral=True,
-                )
-                return
-
-            thread_name = f"trade-{interaction.user.display_name}-and-{user.display_name}"[:100]
-            thread = await channel.create_thread(name=thread_name)
-            if isinstance(thread, discord.Thread):
-                import contextlib
-                with contextlib.suppress(discord.HTTPException):
-                    await thread.add_user(user)
-                await thread.send(
-                    f"{interaction.user.mention} {user.mention} Trade thread created. "
-                    "Use `/rep` when you want to leave positive reputation."
-                )
-
-            await interaction.response.send_message(f"Thread created: {thread.mention}", ephemeral=True)
-
-        @self.tree.command(name="rep", description="Give positive reputation in one category")
-        @app_commands.describe(user="Member receiving reputation")
-        async def rep(
-            interaction: discord.Interaction,
-            user: discord.Member,
-        ) -> None:
-            if user.id == interaction.user.id:
-                await interaction.response.send_message("You can't rep yourself.", ephemeral=True)
-                return
-            if user.bot:
-                await interaction.response.send_message("You can't rep a bot account.", ephemeral=True)
-                return
-
-            remaining = await self.db.get_pair_cooldown_remaining(
-                interaction.user.id,
-                user.id,
-                REP_COOLDOWN_SECONDS,
-            )
-            if remaining > 0:
-                await interaction.response.send_message(
-                    (
-                        f"You recently repped {user.mention}. "
-                        f"Try again in `{_format_duration(remaining)}`."
-                    ),
-                    ephemeral=True,
-                )
-                return
-
-            await interaction.response.send_message(
-                f"Choose a reputation category for {user.mention}.",
-                view=RepCategoryView(self, user, interaction.user.id),
-                ephemeral=True,
-            )
-
-        @self.tree.command(name="profile", description="View rep profile")
-        async def profile(interaction: discord.Interaction, user: discord.Member | None = None) -> None:
-            target = user or interaction.user
-            p = await self.db.get_profile(target.id)
-            embed = discord.Embed(
-                title=f"🏆 {target.display_name}'s Reputation Profile",
-                color=discord.Color.gold(),
-            )
-            embed.add_field(name="Trading", value=str(p.trading), inline=True)
-            embed.add_field(name="Porter", value=str(p.porter), inline=True)
-            embed.add_field(name="Trials", value=str(p.trials), inline=True)
-            embed.add_field(name="Overall", value=f"**{p.total}**", inline=False)
-            await interaction.response.send_message(embed=embed)
-
-        @self.tree.command(name="scam", description="Add a user to the scam database")
-        @app_commands.describe(user="Discord user to flag")
-        async def scam(interaction: discord.Interaction, user: discord.Member) -> None:
-            if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-                await interaction.response.send_message(
-                    "This command can only be used in a server.",
-                    ephemeral=True,
-                )
-                return
-
-            if not any(role.id == SCAM_COMMAND_ROLE_ID for role in interaction.user.roles):
-                await interaction.response.send_message(
-                    "You don't have permission to use this command.",
-                    ephemeral=True,
-                )
-                return
-
-            if user.bot:
-                await interaction.response.send_message("You can't flag a bot account.", ephemeral=True)
-                return
-            await interaction.response.send_modal(
-                ScamReportModal(bot=self, reported_user=user, requested_by=interaction.user)
-            )
-
-        @self.tree.command(name="check", description="Check an Embark ID against scam history")
-        @app_commands.describe(embark_id="Embark ID to check, e.g. RaiderPro#4821")
-        async def check(interaction: discord.Interaction, embark_id: str) -> None:
-            report = await self.db.get_scam_report_by_embark_id(embark_id)
-            if report is None:
-                await interaction.response.send_message(
-                    f"✅ No scam record found for `{embark_id.strip()}`.",
-                    ephemeral=True,
-                )
-                return
-
-            discord_user_id, stored_embark_id, added_by_id, _ = report
-            await interaction.response.send_message(
-                (
-                    f"⚠️ **Fraud history found** for `{stored_embark_id}`.\n"
-                    f"Linked Discord user: <@{discord_user_id}>\n"
-                    f"Reported by: <@{added_by_id}>"
-                ),
-                ephemeral=True,
-            )
-
-        @self.tree.command(
-            name="sync_rep_roles",
-            description="One-time backfill: grant rep milestone roles to existing members",
-        )
-        async def sync_rep_roles(interaction: discord.Interaction) -> None:
-            if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-                await interaction.response.send_message(
-                    "This command can only be used in a server.",
-                    ephemeral=True,
-                )
-                return
-
-            if not interaction.user.guild_permissions.manage_roles:
-                await interaction.response.send_message(
-                    "You need the **Manage Roles** permission to run this command.",
-                    ephemeral=True,
-                )
-                return
-
-            await interaction.response.defer(ephemeral=True, thinking=True)
-            scanned = 0
-            awarded = 0
-            async for member in interaction.guild.fetch_members(limit=None):
-                if member.bot:
-                    continue
-                scanned += 1
-                profile = await self.db.get_profile(member.id)
-                roles_added = await self._sync_rep_roles_for_member(member, profile.total, profile.trials)
-                awarded += len(roles_added)
-
-            await interaction.followup.send(
-                f"Done. Scanned **{scanned}** members and awarded **{awarded}** role(s).",
-                ephemeral=True,
-            )
-
-
-        @self.tree.command(name="season_start", description="Start a new Trials season")
-        async def season_start(interaction: discord.Interaction) -> None:
-            if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-                await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
-                return
-            if not any(role.id == SEASON_MANAGER_ROLE_ID for role in interaction.user.roles):
-                await interaction.response.send_message("You don't have permission to manage seasons.", ephemeral=True)
-                return
-            try:
-                season = await self.db.start_new_trial_season()
-            except ValueError as exc:
-                await interaction.response.send_message(str(exc), ephemeral=True)
-                return
-            await interaction.response.send_message(f"✅ Started Trials Season **{season}**.")
-
-        @self.tree.command(name="season_end", description="End the active Trials season and wipe trial rep")
-        async def season_end(interaction: discord.Interaction) -> None:
-            if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-                await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
-                return
-            if not any(role.id == SEASON_MANAGER_ROLE_ID for role in interaction.user.roles):
-                await interaction.response.send_message("You don't have permission to manage seasons.", ephemeral=True)
-                return
-            try:
-                season = await self.db.end_active_trial_season()
-            except ValueError as exc:
-                await interaction.response.send_message(str(exc), ephemeral=True)
-                return
-            await interaction.response.send_message(f"✅ Ended Trials Season **{season}**. Trials rep has been reset.")
-
-        @self.tree.command(name="leaderboard_total", description="Show the total reputation leaderboard")
-        async def leaderboard_total(interaction: discord.Interaction) -> None:
-            rows = await self.db.get_total_rep_leaderboard(limit=10)
-            if not rows:
-                await interaction.response.send_message("No reputation data yet.", ephemeral=True)
-                return
-            lines = [f"**{idx}.** <@{uid}> — **{rep}**" for idx, (uid, rep) in enumerate(rows, start=1)]
-            embed = discord.Embed(title="🌟 Total Reputation Leaderboard", description="\n".join(lines), color=discord.Color.blurple())
-            await interaction.response.send_message(embed=embed)
-
-        @self.tree.command(name="leaderboard_trials", description="Show current Trials season leaderboard")
-        async def leaderboard_trials(interaction: discord.Interaction) -> None:
-            season = await self.db.get_active_season_number()
-            if season is None:
-                await interaction.response.send_message("No active Trials season right now.", ephemeral=True)
-                return
-            rows = await self.db.get_trial_season_leaderboard(season, limit=10)
-            if not rows:
-                await interaction.response.send_message(f"Season {season} has no Trials rep yet.", ephemeral=True)
-                return
-            lines = [f"**{idx}.** <@{uid}> — **{rep}**" for idx, (uid, rep) in enumerate(rows, start=1)]
-            embed = discord.Embed(title=f"🧪 Trials Leaderboard — Season {season}", description="\n".join(lines), color=discord.Color.green())
-            await interaction.response.send_message(embed=embed)
-
-        @self.tree.command(
-            name="checkage",
-            description="Remove the new-account role if your account is 30+ days old",
-        )
-        async def checkage(interaction: discord.Interaction) -> None:
-            if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-                await interaction.response.send_message(
-                    "This command can only be used in a server.",
-                    ephemeral=True,
-                )
-                return
-
-            role = interaction.guild.get_role(NEW_ACCOUNT_ROLE_ID)
-            if role is None:
-                await interaction.response.send_message(
-                    "The new-account role is not configured in this server.",
-                    ephemeral=True,
-                )
-                return
-
-            member = interaction.user
-            account_age_days = (discord.utils.utcnow() - member.created_at).days
-            if account_age_days < NEW_ACCOUNT_AGE_DAYS:
-                days_left = NEW_ACCOUNT_AGE_DAYS - account_age_days
-                await interaction.response.send_message(
-                    f"Your account is still too new. Try again in **{days_left}** day(s).",
-                    ephemeral=True,
-                )
-                return
-
-            if role not in member.roles:
-                await interaction.response.send_message(
-                    "You don't currently have the new-account role.",
-                    ephemeral=True,
-                )
-                return
-
-            try:
-                await member.remove_roles(role, reason="Account age verified via /checkage")
-            except (discord.Forbidden, discord.HTTPException):
-                await interaction.response.send_message(
-                    "I couldn't remove the role due to missing permissions.",
-                    ephemeral=True,
-                )
-                return
-
-            await interaction.response.send_message(
-                "✅ Your account is old enough now, so the new-account role has been removed.",
-                ephemeral=True,
-            )
-
-        @self.tree.command(name="blueprint_prices", description="Post/update ARC Raiders blueprint median prices")
-        async def blueprint_prices(interaction: discord.Interaction) -> None:
-            if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-                await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
-                return
-            if not interaction.user.guild_permissions.manage_guild:
-                await interaction.response.send_message("You need Manage Server permission.", ephemeral=True)
-                return
-            await interaction.response.defer(ephemeral=True, thinking=True)
-            count = await self.post_blueprint_prices()
-            await interaction.followup.send(f"Updated {count} blueprint price message(s).", ephemeral=True)
 
 
 def run_bot() -> None:
